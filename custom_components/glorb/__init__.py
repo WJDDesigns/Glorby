@@ -4,14 +4,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from homeassistant.components import panel_custom
-from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_FPS, DEFAULT_FPS, DOMAIN, PANEL_PATH, STATIC_URL, VERSION
+from .const import DOMAIN, PANEL_PATH, STATIC_URL, VERSION
 from .device import GlorbDevice
 from .websocket_api import async_register_commands
 
@@ -24,8 +23,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     await hass.http.async_register_static_paths(
         [StaticPathConfig(STATIC_URL, str(Path(__file__).parent / "frontend"), False)]
     )
-    module = f"{STATIC_URL}/glorb-card.js?v={VERSION}"
-    add_extra_js_url(hass, module)
+    module = f"{STATIC_URL}/glorb-panel.js?v={VERSION}"
     await panel_custom.async_register_panel(
         hass,
         frontend_url_path=PANEL_PATH,
@@ -44,7 +42,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_HOST],
         entry.data.get(CONF_NAME, "Glorb"),
         entry.data[CONF_MAC],
-        entry.options.get(CONF_FPS, DEFAULT_FPS),
+        dict(entry.options),
     )
     await device.async_start()
     hass.data[DOMAIN][entry.entry_id] = device
@@ -54,7 +52,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+    """Settings apply live. Only a new address needs a fresh start."""
+    device: GlorbDevice = hass.data[DOMAIN][entry.entry_id]
+    if device.host != entry.data[CONF_HOST]:
+        await hass.config_entries.async_reload(entry.entry_id)
+    else:
+        await device.async_apply_options(dict(entry.options))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

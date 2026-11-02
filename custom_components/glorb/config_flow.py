@@ -11,9 +11,35 @@ from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResu
 from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from .const import CONF_FPS, DEFAULT_FPS, DOMAIN, MAX_FPS, MIN_FPS
+from .const import (
+    CONF_FLIP,
+    CONF_FPS,
+    CONF_GAMMA,
+    CONF_MICROPHONE,
+    CONF_MIRROR,
+    CONF_ON_EFFECT,
+    CONF_RESUME,
+    CONF_ROTATION,
+    CONF_TRANSITION,
+    DEFAULTS,
+    DOMAIN,
+    MAX_FPS,
+    MIN_FPS,
+    ON_EFFECT_LAMP,
+    ON_EFFECT_LAST,
+)
+from .core.effects import REGISTRY
 
 
 async def _probe(flow: ConfigFlow, host: str) -> dict[str, Any] | None:
@@ -83,13 +109,105 @@ class GlorbConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class GlorbOptionsFlow(OptionsFlow):
+    """Everything about how this lamp is set up."""
+
+    _lining_up = False
+
+    @property
+    def _device(self):
+        return self.hass.data[DOMAIN][self.config_entry.entry_id]
+
+    def _current(self) -> dict[str, Any]:
+        return {**DEFAULTS, **self.config_entry.options}
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="init", menu_options=["lineup", "settings"])
+
+    async def async_step_lineup(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Show colors on the lamp, and apply each change so it can be compared."""
+        if not self._lining_up:
+            self._lining_up = True
+            await self._device.async_begin_lineup()
+        values = {CONF_FLIP: False, CONF_MIRROR: False, CONF_ROTATION: 0.0}
+        values.update({k: self._current()[k] for k in values})
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
-        current = self.config_entry.options.get(CONF_FPS, DEFAULT_FPS)
+            finished = user_input.pop("finished", False)
+            values = user_input
+            self._device.preview_orientation(values)
+            if finished:
+                self._lining_up = False
+                await self._device.async_end_lineup()
+                return self.async_create_entry(data={**self.config_entry.options, **values})
         return self.async_show_form(
-            step_id="init",
+            step_id="lineup",
             data_schema=vol.Schema(
-                {vol.Required(CONF_FPS, default=current): vol.All(vol.Coerce(int), vol.Range(min=MIN_FPS, max=MAX_FPS))}
+                {
+                    vol.Required(CONF_FLIP, default=values[CONF_FLIP]): bool,
+                    vol.Required(CONF_MIRROR, default=values[CONF_MIRROR]): bool,
+                    vol.Required(CONF_ROTATION, default=values[CONF_ROTATION]): NumberSelector(
+                        NumberSelectorConfig(min=0, max=360, step=1, mode=NumberSelectorMode.SLIDER)
+                    ),
+                    vol.Required("finished", default=False): bool,
+                }
+            ),
+        )
+
+    @callback
+    def async_remove(self) -> None:
+        """If the dialog was closed partway, undo the preview."""
+        if self._lining_up:
+            self._lining_up = False
+            device = self._device
+            self.hass.async_create_task(device.async_end_lineup())
+            self.hass.async_create_task(device.async_apply_options(dict(self.config_entry.options)))
+
+    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        current = self._current()
+        host = self.config_entry.data[CONF_HOST]
+        if user_input is not None:
+            new_host = user_input.pop(CONF_HOST).strip()
+            if new_host != host:
+                info = await _probe(self, new_host)
+                if info is None:
+                    errors["base"] = "cannot_connect"
+                elif info.get("mac") != self.config_entry.unique_id:
+                    errors["base"] = "different_lamp"
+            if not errors:
+                options = {**self.config_entry.options, **user_input}
+                options[CONF_FPS] = int(options[CONF_FPS])
+                if new_host != host:
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry, data={**self.config_entry.data, CONF_HOST: new_host}
+                    )
+                return self.async_create_entry(data=options)
+            host = new_host
+            current.update(user_input)
+        effects = [
+            SelectOptionDict(value=ON_EFFECT_LAST, label="Last effect played"),
+            SelectOptionDict(value=ON_EFFECT_LAMP, label="The lamp's own effect"),
+            *(SelectOptionDict(value=fx.id, label=fx.name) for fx in REGISTRY.values() if fx.id != "calibrate"),
+        ]
+        return self.async_show_form(
+            step_id="settings",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=host): str,
+                    vol.Required(CONF_ON_EFFECT, default=current[CONF_ON_EFFECT]): SelectSelector(
+                        SelectSelectorConfig(options=effects, mode=SelectSelectorMode.DROPDOWN)
+                    ),
+                    vol.Required(CONF_RESUME, default=current[CONF_RESUME]): bool,
+                    vol.Required(CONF_MICROPHONE, default=current[CONF_MICROPHONE]): bool,
+                    vol.Required(CONF_FPS, default=current[CONF_FPS]): NumberSelector(
+                        NumberSelectorConfig(min=MIN_FPS, max=MAX_FPS, step=1, mode=NumberSelectorMode.SLIDER)
+                    ),
+                    vol.Required(CONF_TRANSITION, default=current[CONF_TRANSITION]): NumberSelector(
+                        NumberSelectorConfig(min=0, max=15, step=0.1, mode=NumberSelectorMode.SLIDER, unit_of_measurement="s")
+                    ),
+                    vol.Required(CONF_GAMMA, default=current[CONF_GAMMA]): NumberSelector(
+                        NumberSelectorConfig(min=1, max=3.5, step=0.05, mode=NumberSelectorMode.SLIDER)
+                    ),
+                }
             ),
         )

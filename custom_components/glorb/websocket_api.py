@@ -26,7 +26,7 @@ def _device(hass: HomeAssistant, connection, msg) -> GlorbDevice | None:
 def async_register_commands(hass: HomeAssistant) -> None:
     for command in (
         ws_devices, ws_catalog, ws_subscribe, ws_play, ws_params, ws_globals, ws_alert,
-        ws_release, ws_wled, ws_power, ws_look_save, ws_look_delete, ws_look_play, ws_orientation,
+        ws_release, ws_wled, ws_power, ws_look_save, ws_look_delete, ws_look_play,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -214,10 +214,3 @@ async def _look_play(device: GlorbDevice, msg: dict[str, Any]) -> None:
 
 
 ws_look_play = _simple({vol.Required("type"): "glorb/look_play", vol.Required("name"): str}, _look_play)
-
-
-async def _orientation(device: GlorbDevice, msg: dict[str, Any]) -> None:
-    device.set_orientation(msg["values"])
-
-
-ws_orientation = _simple({vol.Required("type"): "glorb/orientation", vol.Required("values"): dict}, _orientation)

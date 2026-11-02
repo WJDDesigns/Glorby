@@ -20,7 +20,7 @@ from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import CONF_ON_EFFECT, DOMAIN, ON_EFFECT_LAMP, ON_EFFECT_LAST
 from .core.effects import REGISTRY
 from .core.engine import OVERLAY_PATTERNS
 from .device import GlorbDevice
@@ -165,8 +165,11 @@ class GlorbLight(LightEntity):
             await d.async_play("solid", {"color": f"#{r:02x}{g:02x}{b:02x}"})
         elif ATTR_EFFECT in kwargs:
             await self._play_named(kwargs[ATTR_EFFECT])
-        elif not d.engine.running and d.saved.get("last_effect"):
-            await d.async_play(d.saved["last_effect"])
+        elif not d.engine.running:
+            choice = d.options[CONF_ON_EFFECT]
+            effect_id = d.saved.get("last_effect") if choice == ON_EFFECT_LAST else choice
+            if effect_id != ON_EFFECT_LAMP and effect_id in REGISTRY:
+                await d.async_play(effect_id)
 
     async def _play_named(self, name: str) -> None:
         d = self.device

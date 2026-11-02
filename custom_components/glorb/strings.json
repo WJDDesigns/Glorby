@@ -2,8 +2,16 @@
   "config": {
     "flow_title": "{name}",
     "step": {
-      "user": { "title": "Add a Glorb", "data": { "host": "Address" } },
-      "confirm": { "title": "Add this Glorb?", "description": "Found at {host}." }
+      "user": {
+        "title": "Add a Glorb",
+        "data": {
+          "host": "Address"
+        }
+      },
+      "confirm": {
+        "title": "Add this Glorb?",
+        "description": "Found at {host}."
+      }
     },
     "error": {
       "cannot_connect": "Could not reach a lamp at that address.",
@@ -15,6 +23,40 @@
     }
   },
   "options": {
-    "step": { "init": { "title": "Streaming", "data": { "fps": "Frames per second" } } }
+    "error": {
+      "cannot_connect": "Could not reach a lamp at that address.",
+      "different_lamp": "A different lamp answered at that address."
+    },
+    "step": {
+      "init": {
+        "title": "Set up your Glorb",
+        "menu_options": {
+          "lineup": "Line up the lamp",
+          "settings": "Settings"
+        }
+      },
+      "lineup": {
+        "title": "Line up the lamp",
+        "description": "Red belongs on top, green on the front, and blue to the right of green. Submit to try each change, and turn on Finished to save.",
+        "data": {
+          "flip": "Upside down",
+          "mirror": "Mirrored",
+          "rotation": "Rotation",
+          "finished": "Finished"
+        }
+      },
+      "settings": {
+        "title": "Settings",
+        "data": {
+          "host": "Address",
+          "on_effect": "Turning on plays",
+          "resume": "Resume effect after a restart",
+          "microphone": "Stream the lamp's microphone",
+          "fps": "Frames per second",
+          "transition": "Crossfade between effects",
+          "gamma": "Gamma"
+        }
+      }
+    }
   }
 }

@@ -1,4 +1,4 @@
-// The Glorb studio: a live 3D model of the lamp and every control for it.
+// The Glorb sidebar page: a live 3D model of the lamp and its effects.
 // Plain WebGL2 and custom elements, so it loads instantly and needs no build step.
 
 const VS = `#version 300 es
@@ -196,7 +196,6 @@ const STYLE = `
 .head { display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 0 12px; font-size: 20px; border-bottom: 1px solid var(--g-line); }
 .wrap { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); padding: 16px; max-width: 1200px; margin: 0 auto; }
 .wide .wrap { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; }
-.card .wrap { padding: 12px; }
 .stage { position: relative; border-radius: 16px; overflow: hidden; background: #07080b; aspect-ratio: 1 / 1; max-height: 70vh; width: 100%; }
 .wide .stage { position: sticky; top: 16px; }
 .halo { position: absolute; inset: 0; transition: background .25s linear; }
@@ -234,13 +233,12 @@ select option { color: #111; }
 .toggle button { flex: 1; }
 `;
 
-class GlorbStudio extends HTMLElement {
+class GlorbPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this.tab = "effects";
     this.category = "Worlds";
-    this.compact = false;
     this.wledFilter = "";
     this.alertForm = { pattern: "pulse", color: "#ff0000", color2: "#000000", duration: 4 };
     this._timers = {};
@@ -248,7 +246,7 @@ class GlorbStudio extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._booted) {
+    if (!this._booted && this.isConnected) {
       this._booted = true;
       this._boot();
     }
@@ -256,7 +254,18 @@ class GlorbStudio extends HTMLElement {
 
   get hass() { return this._hass; }
 
+  set narrow(value) {
+    this._narrow = value;
+    const menu = this.shadowRoot.querySelector("ha-menu-button");
+    if (menu) menu.narrow = value;
+  }
+
+  set panel(_value) {}
+
+  set route(_value) {}
+
   disconnectedCallback() {
+    this._run = (this._run || 0) + 1;
     this._unsub?.();
     this._unsub = null;
     this.sphere?.destroy();
@@ -274,24 +283,32 @@ class GlorbStudio extends HTMLElement {
   }
 
   async _boot() {
+    // Dashboards move cards around, so a boot can be overtaken by a detach.
+    const run = this._run = (this._run || 0) + 1;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style><div class="wrap"><div>Loading</div></div>`;
     try {
       this.devices = await this._hass.callWS({ type: "glorb/devices" });
     } catch (err) {
       this.devices = [];
     }
+    if (run !== this._run) return;
     if (!this.devices.length) {
       this.shadowRoot.querySelector(".wrap").textContent = "No Glorb is set up yet.";
       return;
     }
-    const wanted = this.config?.device;
-    this.device = (this.devices.find((d) => d.id === wanted || d.name === wanted) || this.devices[0]).id;
+    this.device = this.devices[0].id;
     this.catalog = await this._hass.callWS({ type: "glorb/catalog", device: this.device });
+    if (run !== this._run) return;
     this._layout();
-    this._unsub = await this._hass.connection.subscribeMessage((m) => this._onMessage(m), {
+    const unsub = await this._hass.connection.subscribeMessage((m) => this._onMessage(m), {
       type: "glorb/subscribe",
       device: this.device,
     });
+    if (run !== this._run) {
+      unsub();
+      return;
+    }
+    this._unsub = unsub;
   }
 
   _call(type, extra = {}) {
@@ -341,10 +358,10 @@ class GlorbStudio extends HTMLElement {
   }
 
   _layout() {
-    const wide = !this.compact && this.offsetWidth >= 820;
+    const wide = this.offsetWidth >= 820;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
-      ${this.isPanel ? `<div class="head"><ha-menu-button></ha-menu-button><span>Glorb</span></div>` : ""}
-      <div class="${wide ? "wide" : ""} ${this.compact ? "card" : ""}">
+      <div class="head"><ha-menu-button></ha-menu-button><span>Glorb</span></div>
+      <div class="${wide ? "wide" : ""}">
         <div class="wrap">
           <div class="stage">
             <div class="halo"></div>
@@ -374,7 +391,7 @@ class GlorbStudio extends HTMLElement {
     this._resize?.disconnect();
     this._resize = new ResizeObserver(() => {
       const box = root.querySelector(".wrap")?.parentElement;
-      if (box && !this.compact) box.classList.toggle("wide", this.offsetWidth >= 820);
+      if (box) box.classList.toggle("wide", this.offsetWidth >= 820);
     });
     this._resize.observe(this);
     this._renderPanel();
@@ -431,13 +448,8 @@ class GlorbStudio extends HTMLElement {
     master.append(bri);
     panel.append(master);
 
-    if (this.compact) {
-      panel.append(this._effectSelect());
-      return;
-    }
-
     const tabs = this._el(`<div class="tabs" role="tablist"></div>`);
-    [["effects", "Effects"], ["tune", "Tune"], ["lamp", "Lamp effects"], ["looks", "Looks"], ["alerts", "Alerts"], ["lineup", "Line up"]].forEach(([id, label]) => {
+    [["effects", "Effects"], ["tune", "Tune"], ["lamp", "Lamp effects"], ["looks", "Looks"], ["alerts", "Alerts"]].forEach(([id, label]) => {
       tabs.append(this._button(label, () => { this.tab = id; this._renderPanel(); }, this.tab === id));
     });
     panel.append(tabs);
@@ -450,18 +462,7 @@ class GlorbStudio extends HTMLElement {
       lamp: () => this._tabLamp(body),
       looks: () => this._tabLooks(body),
       alerts: () => this._tabAlerts(body),
-      lineup: () => this._tabLineup(body),
     })[this.tab]();
-  }
-
-  _effectSelect() {
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", "Effect");
-    const s = this.state;
-    if (!s.running) select.append(new Option("Lamp effect", "", true, true));
-    this.catalog.effects.forEach((fx) => select.append(new Option(fx.name, fx.id, false, s.effect === fx.id && s.running)));
-    select.addEventListener("change", () => select.value && this._call("glorb/play", { effect: select.value }));
-    return select;
   }
 
   _tabEffects(body) {
@@ -553,8 +554,6 @@ class GlorbStudio extends HTMLElement {
       { key: "hue", name: "Hue shift", kind: "range", min: -180, max: 180, step: 1 },
       { key: "saturation", name: "Saturation", kind: "range", min: 0, max: 2, step: 0.01 },
       { key: "gain", name: "Effect brightness", kind: "range", min: 0, max: 2, step: 0.01 },
-      { key: "gamma", name: "Gamma", kind: "range", min: 1, max: 3.5, step: 0.05 },
-      { key: "transition", name: "Crossfade", kind: "range", min: 0, max: 15, step: 0.1 },
     ];
     const fields = this._el(`<div class="fields"></div>`);
     defs.forEach((p) => {
@@ -636,57 +635,6 @@ class GlorbStudio extends HTMLElement {
     body.append(this._button("Play alert", () => this._call("glorb/alert", { ...form })));
   }
 
-  _tabLineup(body) {
-    const o = this.state.orientation;
-    const s = this.state;
-    body.append(this._button("Show line-up colors", () => this._call("glorb/play", { effect: "calibrate" }), s.running && s.effect === "calibrate"));
-    const fields = this._el(`<div class="fields"></div>`);
-    const set = (key, v) => this._debounced(`o:${key}`, () => this._call("glorb/orientation", { values: { [key]: v } }));
-    fields.append(this._field({ name: "Upside down", kind: "bool" }, o.flip, (v) => set("flip", v)));
-    fields.append(this._field({ name: "Mirrored", kind: "bool" }, o.mirror, (v) => set("mirror", v)));
-    fields.append(this._field({ name: "Rotation", kind: "range", min: 0, max: 360, step: 1 }, o.rotation, (v) => set("rotation", v)));
-    body.append(fields);
-  }
-
-  // Lovelace card API
-  setConfig(config) {
-    this.config = config;
-    this.compact = !config.full;
-  }
-
-  getCardSize() { return this.compact ? 7 : 12; }
-
-  static getStubConfig() { return {}; }
-}
-
-class GlorbPanel extends GlorbStudio {
-  constructor() {
-    super();
-    this.compact = false;
-    this.isPanel = true;
-  }
-
-  set narrow(value) {
-    this._narrow = value;
-    const menu = this.shadowRoot.querySelector("ha-menu-button");
-    if (menu) menu.narrow = value;
-  }
-
-  set panel(_value) {}
-  set route(_value) {}
-}
-
-class GlorbCard extends GlorbStudio {
-  connectedCallback() {
-    super.connectedCallback();
-    this.style.display = "block";
-  }
 }
 
 if (!customElements.get("glorb-panel")) customElements.define("glorb-panel", GlorbPanel);
-if (!customElements.get("glorb-card")) customElements.define("glorb-card", GlorbCard);
-
-window.customCards = window.customCards || [];
-if (!window.customCards.some((c) => c.type === "glorb-card")) {
-  window.customCards.push({ type: "glorb-card", name: "Glorb", description: "A live 3D model of the lamp.", preview: false });
-}

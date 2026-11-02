@@ -17,7 +17,16 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    CONF_FLIP,
+    CONF_FPS,
+    CONF_GAMMA,
+    CONF_MICROPHONE,
+    CONF_MIRROR,
+    CONF_RESUME,
+    CONF_ROTATION,
+    CONF_TRANSITION,
     DDP_PORT,
+    DEFAULTS,
     DOMAIN,
     HEALTH_INTERVAL,
     HEALTH_MISSES,
@@ -47,7 +56,7 @@ class _Sender(asyncio.DatagramProtocol):
 
 
 class GlorbDevice:
-    def __init__(self, hass: HomeAssistant, entry_id: str, host: str, name: str, mac: str, fps: int) -> None:
+    def __init__(self, hass: HomeAssistant, entry_id: str, host: str, name: str, mac: str, options: dict[str, Any]) -> None:
         self.hass = hass
         self.entry_id = entry_id
         self.host = host
@@ -59,10 +68,11 @@ class GlorbDevice:
             "looks": {},
             "params": {},
             "globals": {},
-            "orientation": {"mirror": False, "flip": False, "rotation": 0.0},
             "resume": None,
         }
-        self.engine = Engine(self._send, fps=min(fps, MAX_FPS), state_of=self._state_of)
+        self.options = {**DEFAULTS, **options}
+        self.engine = Engine(self._send, fps=self._fps(), state_of=self._state_of)
+        self._before_lineup: dict[str, Any] | None = None
         self.engine.on_frame = self._on_engine_frame
         self.audio_state = AudioState(self.engine.audio)
         self.wled_state: dict[str, Any] = {}
@@ -90,6 +100,7 @@ class GlorbDevice:
             self.saved.update(stored)
         self._apply_orientation()
         self.engine.set_globals(self.saved["globals"])
+        self.engine.set_globals({"gamma": self.options[CONF_GAMMA], "transition": self.options[CONF_TRANSITION]})
         await self.hass.loop.create_datagram_endpoint(
             lambda: self._sender, remote_addr=(self.host, DDP_PORT)
         )
@@ -103,7 +114,8 @@ class GlorbDevice:
         except OSError as err:
             _LOGGER.warning("Could not listen for the lamp's microphone: %s", err)
         resume = self.saved.get("resume")
-        if resume and resume["effect"] in REGISTRY:
+        await self._sync_mic()
+        if self.options[CONF_RESUME] and resume and resume["effect"] in REGISTRY:
             await self.async_play(resume["effect"], resume.get("params"))
 
     async def async_stop(self) -> None:
@@ -272,8 +284,6 @@ class GlorbDevice:
         self.engine.start()
         await self._sync_peek()
         self._remember()
-        if fx.category == "Music":
-            await self._ensure_mic()
         if fx.p.get("source"):
             await self.async_load_picture(str(fx.p["source"]))
         self.notify()
@@ -340,14 +350,15 @@ class GlorbDevice:
         await self._sync_peek()
         self.notify()
 
-    async def _ensure_mic(self) -> None:
-        """Have the lamp broadcast its microphone. Only writes when it isn't already."""
+    async def _sync_mic(self) -> None:
+        """Match the lamp's microphone broadcast to the setting. Only writes on a change."""
+        want = 1 if self.options[CONF_MICROPHONE] else 0
         try:
             cfg = await self._get("json/cfg")
-            if cfg["um"]["AudioReactive"]["sync"]["mode"] != 1:
-                await self.async_wled({"um": {"AudioReactive": {"sync": {"mode": 1}}}}, "json/cfg")
+            if cfg["um"]["AudioReactive"]["sync"]["mode"] != want:
+                await self.async_wled({"um": {"AudioReactive": {"sync": {"mode": want}}}}, "json/cfg")
         except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, ValueError) as err:
-            _LOGGER.warning("Could not turn on the lamp's microphone stream: %s", err)
+            _LOGGER.warning("Could not change the lamp's microphone stream: %s", err)
 
     async def async_load_picture(self, source: str) -> None:
         fx = self.engine.current
@@ -390,19 +401,54 @@ class GlorbDevice:
         self.async_set_globals(look.get("globals", {}))
         await self.async_play(look["effect"], look.get("params"))
 
-    # Orientation
+    # Settings
+
+    def _fps(self) -> int:
+        return min(int(self.options[CONF_FPS]), MAX_FPS)
 
     def _apply_orientation(self) -> None:
-        o = self.saved["orientation"]
+        o = self.options
         self.engine.set_geometry(
-            build(mirror=bool(o["mirror"]), flip=bool(o["flip"]), rotation_deg=float(o["rotation"]))
+            build(mirror=bool(o[CONF_MIRROR]), flip=bool(o[CONF_FLIP]), rotation_deg=float(o[CONF_ROTATION]))
         )
 
-    def set_orientation(self, values: dict[str, Any]) -> None:
-        self.saved["orientation"].update(values)
+    async def async_apply_options(self, options: dict[str, Any]) -> None:
+        self.options = {**DEFAULTS, **options}
+        self.engine.fps = self._fps()
+        self.engine.set_globals({"gamma": self.options[CONF_GAMMA], "transition": self.options[CONF_TRANSITION]})
         self._apply_orientation()
-        self._save()
+        await self._sync_mic()
         self.notify()
+
+    def preview_orientation(self, values: dict[str, Any]) -> None:
+        """Try an orientation during line-up without saving it."""
+        self.options.update(values)
+        self._apply_orientation()
+        self.notify()
+
+    async def async_begin_lineup(self) -> None:
+        fx = self.engine.current if self.engine.running else None
+        self._before_lineup = {
+            "resume": self.saved.get("resume"),
+            "params": dict(self.saved["params"]),
+            "effect": fx.id if fx else None,
+            "effect_params": dict(fx.p) if fx else None,
+        }
+        await self.async_wled({"on": True})
+        await self.async_play("calibrate", transition=0)
+
+    async def async_end_lineup(self) -> None:
+        """Put back whatever was playing before line-up."""
+        before, self._before_lineup = self._before_lineup, None
+        if before is None:
+            return
+        if before["effect"]:
+            await self.async_play(before["effect"], before["effect_params"], 0)
+        else:
+            await self.async_release()
+        self.saved["resume"] = before["resume"]
+        self.saved["params"] = before["params"]
+        self._save()
 
     # Snapshots for the frontend
 
@@ -432,7 +478,7 @@ class GlorbDevice:
                 "power": (self.wled_info.get("leds") or {}).get("pwr"),
             },
             "looks": sorted(self.saved["looks"]),
-            "orientation": self.saved["orientation"],
+            "orientation": {k: self.options[k] for k in (CONF_MIRROR, CONF_FLIP, CONF_ROTATION)},
         }
 
 

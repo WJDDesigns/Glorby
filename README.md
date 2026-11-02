@@ -7,8 +7,8 @@ LED's 3D position and streamed to the lamp, and a live 3D model mirrors it.
 
 - `custom_components/glorb/core/`: geometry, effects and engine. No Home Assistant
   imports, so it runs and tests on its own.
-- `custom_components/glorb/`: the integration (light entity, services, studio commands).
-- `custom_components/glorb/frontend/glorb-card.js`: the sidebar studio and `custom:glorb-card`.
+- `custom_components/glorb/`: the integration. Setup is under Configure: line-up, frame rate, gamma, microphone.
+- `custom_components/glorb/frontend/glorb-panel.js`: the sidebar page with the 3D model and effects.
 - `tools/`: `play.py` runs effects on the lamp from a terminal, `soak.py` tests frame
   rates, `contact_sheet.py` renders every effect to an image.
 

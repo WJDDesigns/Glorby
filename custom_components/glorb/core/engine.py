@@ -266,7 +266,6 @@ class Engine:
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
-        period = 1 / self.fps
         last = loop.time()
         deadline = last
         window_start = last
@@ -287,7 +286,7 @@ class Engine:
             except Exception:  # keep the lamp alive through a bad effect
                 _LOGGER.exception("Effect failed, stopping it")
                 self.current = None
-            deadline += period
+            deadline += 1 / self.fps
             delay = deadline - loop.time()
             if delay < -0.25:
                 deadline = loop.time()
