@@ -14,6 +14,7 @@ import numpy as np
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.storage import Store
 
 from .const import (
@@ -42,6 +43,7 @@ from .core.geometry import CELLS, MATRIX_H, MATRIX_W, build
 
 _LOGGER = logging.getLogger(__name__)
 
+LINEUP_EFFECT = "calibrate"
 SAVE_DELAY = 5
 RECONNECT_SECONDS = 5
 HEADER = 4  # 'L', version, width, height
@@ -279,6 +281,7 @@ class GlorbDevice:
         self, effect_id: str, params: dict[str, Any] | None = None, transition: float | None = None
     ) -> None:
         merged = {**self.saved["params"].get(effect_id, {}), **(params or {})}
+        self._before_lineup = None
         fx = self.engine.play(effect_id, merged, transition=transition)
         self.fault = None
         self.engine.start()
@@ -317,7 +320,7 @@ class GlorbDevice:
 
     def _remember(self) -> None:
         fx = self.engine.current
-        if fx is None:
+        if fx is None or fx.id == LINEUP_EFFECT:
             return
         self.saved["params"][fx.id] = dict(fx.p)
         self.saved["resume"] = {"effect": fx.id, "params": dict(fx.p)}
@@ -420,35 +423,41 @@ class GlorbDevice:
         await self._sync_mic()
         self.notify()
 
-    def preview_orientation(self, values: dict[str, Any]) -> None:
-        """Try an orientation during line-up without saving it."""
-        self.options.update(values)
-        self._apply_orientation()
-        self.notify()
+    def set_option(self, key: str, value: Any) -> None:
+        """Save one setting. The entry's update listener applies it."""
+        entry = self.hass.config_entries.async_get_entry(self.entry_id)
+        self.hass.config_entries.async_update_entry(entry, options={**entry.options, key: value})
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.mac)},
+            connections={(CONNECTION_NETWORK_MAC, self.mac)},
+            name=self.name,
+            manufacturer="SNRGY Studios",
+            model="GLORB",
+            sw_version=self.wled_info.get("ver"),
+            configuration_url=f"http://{self.host}",
+        )
+
+    @property
+    def lining_up(self) -> bool:
+        return self.engine.running and self.engine.current is not None and self.engine.current.id == LINEUP_EFFECT
 
     async def async_begin_lineup(self) -> None:
         fx = self.engine.current if self.engine.running else None
-        self._before_lineup = {
-            "resume": self.saved.get("resume"),
-            "params": dict(self.saved["params"]),
-            "effect": fx.id if fx else None,
-            "effect_params": dict(fx.p) if fx else None,
-        }
+        before = {"effect": fx.id, "params": dict(fx.p)} if fx and fx.id != LINEUP_EFFECT else None
         await self.async_wled({"on": True})
-        await self.async_play("calibrate", transition=0)
+        await self.async_play(LINEUP_EFFECT, transition=0)
+        self._before_lineup = before
 
     async def async_end_lineup(self) -> None:
         """Put back whatever was playing before line-up."""
         before, self._before_lineup = self._before_lineup, None
-        if before is None:
-            return
-        if before["effect"]:
-            await self.async_play(before["effect"], before["effect_params"], 0)
+        if before:
+            await self.async_play(before["effect"], before["params"], 0)
         else:
             await self.async_release()
-        self.saved["resume"] = before["resume"]
-        self.saved["params"] = before["params"]
-        self._save()
 
     # Snapshots for the frontend
 

@@ -38,3 +38,14 @@ def test_wiring_chain_walks_across_shared_edges():
     g = build()
     for i in range(LED_COUNT - 1):
         assert i + 1 in g.neighbors[i]
+
+
+def test_upside_down_is_a_half_turn_not_a_mirror_image():
+    """A real lamp can only be turned over, so handedness must survive."""
+    plain, flipped = build(), build(flip=True)
+    tri = plain.faces[0]
+    a = np.linalg.det(plain.vertices[tri])
+    b = np.linalg.det(flipped.vertices[tri])
+    assert np.sign(a) == np.sign(b)
+    assert np.allclose(flipped.pos[:, 0], plain.pos[:, 0])
+    assert np.allclose(flipped.pos[:, 2], -plain.pos[:, 2])

@@ -23,14 +23,11 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from .const import (
-    CONF_FLIP,
     CONF_FPS,
     CONF_GAMMA,
     CONF_MICROPHONE,
-    CONF_MIRROR,
     CONF_ON_EFFECT,
     CONF_RESUME,
-    CONF_ROTATION,
     CONF_TRANSITION,
     DEFAULTS,
     DOMAIN,
@@ -109,59 +106,12 @@ class GlorbConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class GlorbOptionsFlow(OptionsFlow):
-    """Everything about how this lamp is set up."""
-
-    _lining_up = False
-
-    @property
-    def _device(self):
-        return self.hass.data[DOMAIN][self.config_entry.entry_id]
+    """Settings that are chosen once. Orientation is on the device page."""
 
     def _current(self) -> dict[str, Any]:
         return {**DEFAULTS, **self.config_entry.options}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(step_id="init", menu_options=["lineup", "settings"])
-
-    async def async_step_lineup(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Show colors on the lamp, and apply each change so it can be compared."""
-        if not self._lining_up:
-            self._lining_up = True
-            await self._device.async_begin_lineup()
-        values = {CONF_FLIP: False, CONF_MIRROR: False, CONF_ROTATION: 0.0}
-        values.update({k: self._current()[k] for k in values})
-        if user_input is not None:
-            finished = user_input.pop("finished", False)
-            values = user_input
-            self._device.preview_orientation(values)
-            if finished:
-                self._lining_up = False
-                await self._device.async_end_lineup()
-                return self.async_create_entry(data={**self.config_entry.options, **values})
-        return self.async_show_form(
-            step_id="lineup",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_FLIP, default=values[CONF_FLIP]): bool,
-                    vol.Required(CONF_MIRROR, default=values[CONF_MIRROR]): bool,
-                    vol.Required(CONF_ROTATION, default=values[CONF_ROTATION]): NumberSelector(
-                        NumberSelectorConfig(min=0, max=360, step=1, mode=NumberSelectorMode.SLIDER)
-                    ),
-                    vol.Required("finished", default=False): bool,
-                }
-            ),
-        )
-
-    @callback
-    def async_remove(self) -> None:
-        """If the dialog was closed partway, undo the preview."""
-        if self._lining_up:
-            self._lining_up = False
-            device = self._device
-            self.hass.async_create_task(device.async_end_lineup())
-            self.hass.async_create_task(device.async_apply_options(dict(self.config_entry.options)))
-
-    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         current = self._current()
         host = self.config_entry.data[CONF_HOST]
@@ -189,7 +139,7 @@ class GlorbOptionsFlow(OptionsFlow):
             *(SelectOptionDict(value=fx.id, label=fx.name) for fx in REGISTRY.values() if fx.id != "calibrate"),
         ]
         return self.async_show_form(
-            step_id="settings",
+            step_id="init",
             errors=errors,
             data_schema=vol.Schema(
                 {

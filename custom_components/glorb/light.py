@@ -17,7 +17,6 @@ from homeassistant.components.light import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, entity_platform
-from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_ON_EFFECT, DOMAIN, ON_EFFECT_LAMP, ON_EFFECT_LAST
@@ -88,15 +87,7 @@ class GlorbLight(LightEntity):
     def __init__(self, device: GlorbDevice) -> None:
         self.device = device
         self._attr_unique_id = device.mac
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, device.mac)},
-            connections={(CONNECTION_NETWORK_MAC, device.mac)},
-            name=device.name,
-            manufacturer="SNRGY Studios",
-            model="GLORB",
-            sw_version=device.wled_info.get("ver"),
-            configuration_url=f"http://{device.host}",
-        )
+        self._attr_device_info = device.device_info
         self._last_rgb = (255, 122, 24)
 
     async def async_added_to_hass(self) -> None:

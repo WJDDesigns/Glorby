@@ -1,6 +1,6 @@
 """Constants for the Glorb integration."""
 DOMAIN = "glorb"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 CONF_FPS = "fps"
 DEFAULT_FPS = 30
@@ -8,7 +8,7 @@ DEFAULT_FPS = 30
 MAX_FPS = 30
 MIN_FPS = 5
 
-# Everything set from Settings > Devices & services > Glorb > Configure.
+# Orientation is on the device page so it applies live. The rest is under Configure.
 CONF_FLIP = "flip"
 CONF_MIRROR = "mirror"
 CONF_ROTATION = "rotation"
@@ -21,7 +21,7 @@ ON_EFFECT_LAST = "last"
 ON_EFFECT_LAMP = "lamp"
 DEFAULTS = {
     CONF_FPS: DEFAULT_FPS,
-    CONF_FLIP: False,
+    CONF_FLIP: True,  # A standing lamp has the first LEDs at its base.
     CONF_MIRROR: False,
     CONF_ROTATION: 0.0,
     CONF_GAMMA: 2.8,

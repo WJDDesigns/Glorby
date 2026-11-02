@@ -155,7 +155,8 @@ def build(
         if mirror:
             verts = verts * np.array([1, -1, 1])
         if flip:
-            verts = verts * np.array([1, 1, -1])
+            # A half turn, not a reflection: the lamp is the same object upside down.
+            verts = verts * np.array([1, -1, -1])
 
     pos = verts[tri].mean(axis=1)
     pos /= np.linalg.norm(pos, axis=1, keepdims=True)

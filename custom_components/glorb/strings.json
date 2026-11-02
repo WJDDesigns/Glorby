@@ -29,24 +29,7 @@
     },
     "step": {
       "init": {
-        "title": "Set up your Glorb",
-        "menu_options": {
-          "lineup": "Line up the lamp",
-          "settings": "Settings"
-        }
-      },
-      "lineup": {
-        "title": "Line up the lamp",
-        "description": "Red belongs on top, green on the front, and blue to the right of green. Submit to try each change, and turn on Finished to save.",
-        "data": {
-          "flip": "Upside down",
-          "mirror": "Mirrored",
-          "rotation": "Rotation",
-          "finished": "Finished"
-        }
-      },
-      "settings": {
-        "title": "Settings",
+        "title": "Glorb settings",
         "data": {
           "host": "Address",
           "on_effect": "Turning on plays",
