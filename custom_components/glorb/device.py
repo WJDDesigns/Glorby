@@ -77,6 +77,8 @@ class GlorbDevice:
         self.options = {**DEFAULTS, **options}
         self.engine = Engine(self._send, fps=self._fps(), state_of=self._state_of)
         self._before_lineup: dict[str, Any] | None = None
+        self.restarts = 0
+        self._last_uptime = 0
         self.engine.on_frame = self._on_engine_frame
         self.audio_state = AudioState(self.engine.audio)
         self.wled_state: dict[str, Any] = {}
@@ -213,6 +215,7 @@ class GlorbDevice:
                 self.wled_info = await self._get("json/info")
                 misses = 0
                 self.available = True
+                self._note_uptime()
                 self.notify()
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                 misses += 1
@@ -225,6 +228,18 @@ class GlorbDevice:
                     await self.engine.stop()
                 self.available = False
                 self.notify()
+
+    def _note_uptime(self) -> None:
+        """Catch the lamp restarting by itself, since it doesn't report why."""
+        uptime = int(self.wled_info.get("uptime", 0))
+        if uptime < self._last_uptime:
+            self.restarts += 1
+            playing = self.engine.current.name if self.engine.running and self.engine.current else "its own effect"
+            _LOGGER.warning(
+                "The lamp restarted after %s seconds while showing %s (restart %s since Home Assistant started)",
+                self._last_uptime, playing, self.restarts,
+            )
+        self._last_uptime = uptime
 
     # Views
 
@@ -427,11 +442,15 @@ class GlorbDevice:
 
     async def async_apply_options(self, options: dict[str, Any]) -> None:
         previous = self.options[CONF_ON_EFFECT]
+        mic_before = self.options[CONF_MICROPHONE]
         self.options = {**DEFAULTS, **options}
         self.engine.fps = self._fps()
         self.engine.set_globals({"gamma": self.options[CONF_GAMMA], "transition": self.options[CONF_TRANSITION]})
         self._apply_orientation()
-        await self._sync_mic()
+        # Only when it changed: a dragged slider lands here many times, and each
+        # check would be a large request to a lamp that's busy streaming.
+        if self.options[CONF_MICROPHONE] != mic_before:
+            await self._sync_mic()
         chosen = self.options[CONF_ON_EFFECT]
         if chosen != previous:
             # Choosing an effect should show it now, not at the next power-on.

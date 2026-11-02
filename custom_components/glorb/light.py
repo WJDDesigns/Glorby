@@ -142,6 +142,7 @@ class GlorbLight(LightEntity):
             "stream_fps": snap["fps"],
             "microphone": snap["audio_active"],
             "fault": self.device.fault,
+            "lamp_restarts": self.device.restarts,
         }
 
     async def async_turn_on(self, **kwargs: Any) -> None:
