@@ -608,6 +608,58 @@ class Stars(Effect):
         return palettes.color(self.p["sky"]) + palettes.color(self.p["tint"]) * (self.v * self.v)[:, None]
 
 
+@effect
+class Matrix(Effect):
+    """Streams of code falling down meridians, pole to pole."""
+
+    id = "matrix"
+    name = "Matrix"
+    category = "Ambient"
+    MAX_STREAMS = 14
+    FALL = 0.9  # radians per second
+    HEAD = 0.4  # about one triangle
+    params = (
+        _speed(),
+        Param("streams", "Streams", "range", 7, 2, MAX_STREAMS, 1),
+        Param("trail", "Trail", "range", 1.5, 0.4, 3.0, 0.05),
+        Param("color", "Color", "color", "#00ff41"),
+        Param("lead", "Lead color", "color", "#d8ffe0"),
+    )
+
+    def __init__(self, geo, rng) -> None:
+        super().__init__(geo, rng)
+        self.lon = rng.uniform(-math.pi, math.pi, self.MAX_STREAMS)
+        self.head = rng.uniform(0, math.pi + 1.5, self.MAX_STREAMS)
+        self.rate = rng.uniform(0.7, 1.4, self.MAX_STREAMS)
+        self.glyph = rng.uniform(0.35, 1.0, LED_COUNT)
+
+    def render(self, ctx):
+        dt = ctx.dt * self.p["speed"]
+        trail = self.p["trail"]
+        self.head += self.rate * self.FALL * dt
+        done = self.head > math.pi + trail
+        count = int(done.sum())
+        if count:
+            self.lon[done] = self.rng.uniform(-math.pi, math.pi, count)
+            self.head[done] = self.rng.uniform(-1.2, 0.0, count)
+            self.rate[done] = self.rng.uniform(0.7, 1.4, count)
+        changed = self.rng.random(LED_COUNT) < 6.0 * dt
+        self.glyph = np.where(changed, self.rng.uniform(0.35, 1.0, LED_COUNT), self.glyph)
+
+        down = math.pi / 2 - ctx.lat
+        lit = np.zeros(LED_COUNT)
+        lead = np.zeros(LED_COUNT)
+        for i in range(int(self.p["streams"])):
+            across = np.abs((ctx.lon - self.lon[i] + math.pi) % math.tau - math.pi) * np.cos(ctx.lat)
+            column = 1.0 - _smooth(0.2, 0.4, across)
+            behind = self.head[i] - down
+            ahead = behind < 0
+            lit = np.maximum(lit, column * np.where(ahead, 0.0, np.exp(-np.maximum(behind, 0.0) / (trail * 0.45))))
+            lead = np.maximum(lead, column * np.where(ahead | (behind > self.HEAD), 0.0, 1.0))
+        body = palettes.color(self.p["color"]) * (lit * self.glyph)[:, None]
+        return body * (1.0 - lead[:, None]) + palettes.color(self.p["lead"]) * lead[:, None]
+
+
 # --- Geometry ----------------------------------------------------------------
 
 

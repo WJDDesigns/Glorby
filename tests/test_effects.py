@@ -57,6 +57,19 @@ def test_effects_are_not_black():
         assert total > 300, effect_id
 
 
+def test_matrix_falls_from_the_top_and_lights_nothing_ahead_of_it():
+    e = engine()
+    fx = e.play("matrix")
+    fx.head[:] = 0.0
+    fx.rate[:] = 1.0
+    for _ in range(30):
+        display, _p = e.step(1 / 30)
+    colors = np.frombuffer(display, dtype=np.uint8).reshape(-1, 3)
+    down = np.pi / 2 - e.geo.lat
+    assert colors.sum(axis=1)[down < fx.head[0]].max() > 0
+    assert colors.sum(axis=1)[down > fx.head[0]].max() == 0
+
+
 def test_packet_only_writes_real_cells():
     e = engine()
     e.play("solid", {"color": "#ffffff"})
