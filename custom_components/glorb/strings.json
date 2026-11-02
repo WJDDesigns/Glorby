@@ -1,0 +1,20 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": { "title": "Add a Glorb", "data": { "host": "Address" } },
+      "confirm": { "title": "Add this Glorb?", "description": "Found at {host}." }
+    },
+    "error": {
+      "cannot_connect": "Could not reach a lamp at that address.",
+      "not_glorb": "That device runs WLED, but not the Glorb firmware."
+    },
+    "abort": {
+      "already_configured": "This Glorb is already set up.",
+      "not_glorb": "That device is not a Glorb."
+    }
+  },
+  "options": {
+    "step": { "init": { "title": "Streaming", "data": { "fps": "Frames per second" } } }
+  }
+}

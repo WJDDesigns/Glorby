@@ -1,0 +1,123 @@
+play:
+  name: Play effect
+  target:
+    entity:
+      integration: glorb
+  fields:
+    effect:
+      name: Effect
+      required: true
+      example: eye
+      selector:
+        text:
+    params:
+      name: Settings
+      example: '{"iris": "#ff0000"}'
+      selector:
+        object:
+    transition:
+      name: Crossfade seconds
+      selector:
+        number: { min: 0, max: 30, step: 0.1 }
+set_params:
+  name: Change effect settings
+  target:
+    entity:
+      integration: glorb
+  fields:
+    params:
+      name: Settings
+      required: true
+      example: '{"look_x": 0.5, "track": false}'
+      selector:
+        object:
+set_globals:
+  name: Change global settings
+  target:
+    entity:
+      integration: glorb
+  fields:
+    spin:
+      name: Spin (turns per minute)
+      selector:
+        number: { min: -60, max: 60, step: 0.5 }
+    tumble:
+      name: Tumble (turns per minute)
+      selector:
+        number: { min: -60, max: 60, step: 0.5 }
+    hue:
+      name: Hue shift
+      selector:
+        number: { min: -180, max: 180 }
+    saturation:
+      name: Saturation
+      selector:
+        number: { min: 0, max: 2, step: 0.01 }
+    gain:
+      name: Effect brightness
+      selector:
+        number: { min: 0, max: 2, step: 0.01 }
+    gamma:
+      name: Gamma
+      selector:
+        number: { min: 1, max: 3.5, step: 0.05 }
+    transition:
+      name: Default crossfade seconds
+      selector:
+        number: { min: 0, max: 30, step: 0.1 }
+alert:
+  name: Alert
+  target:
+    entity:
+      integration: glorb
+  fields:
+    pattern:
+      name: Pattern
+      selector:
+        select:
+          options: [pulse, flash, ring, sweep, split, spin]
+    color:
+      name: Color
+      example: "#ff0000"
+      selector:
+        text:
+    color2:
+      name: Second color
+      example: "#0000ff"
+      selector:
+        text:
+    duration:
+      name: Seconds
+      selector:
+        number: { min: 0.1, max: 600, step: 0.1 }
+    opacity:
+      name: Opacity
+      selector:
+        number: { min: 0, max: 1, step: 0.01 }
+play_look:
+  name: Play saved look
+  target:
+    entity:
+      integration: glorb
+  fields:
+    name:
+      name: Look
+      required: true
+      selector:
+        text:
+show_image:
+  name: Wrap image around the sphere
+  target:
+    entity:
+      integration: glorb
+  fields:
+    source:
+      name: Path or URL
+      required: true
+      selector:
+        text:
+release:
+  name: Return to the lamp's own effects
+  target:
+    entity:
+      integration: glorb
