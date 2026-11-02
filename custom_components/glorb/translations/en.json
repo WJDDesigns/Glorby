@@ -32,7 +32,7 @@
         "title": "Glorb settings",
         "data": {
           "host": "Address",
-          "on_effect": "Turning on plays",
+          "on_effect": "Default effect",
           "resume": "Resume effect after a restart",
           "microphone": "Stream the lamp's microphone",
           "fps": "Frames per second",

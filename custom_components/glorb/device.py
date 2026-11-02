@@ -23,6 +23,7 @@ from .const import (
     CONF_GAMMA,
     CONF_MICROPHONE,
     CONF_MIRROR,
+    CONF_ON_EFFECT,
     CONF_RESUME,
     CONF_ROTATION,
     CONF_TRANSITION,
@@ -33,6 +34,7 @@ from .const import (
     HEALTH_MISSES,
     HEALTH_TIMEOUT,
     MAX_FPS,
+    ON_EFFECT_LAMP,
     STORAGE_VERSION,
     VIEW_EVERY_SECONDS,
 )
@@ -119,6 +121,8 @@ class GlorbDevice:
         await self._sync_mic()
         if self.options[CONF_RESUME] and resume and resume["effect"] in REGISTRY:
             await self.async_play(resume["effect"], resume.get("params"))
+        else:
+            await self._play_default()
 
     async def async_stop(self) -> None:
         for task in self._tasks:
@@ -415,12 +419,26 @@ class GlorbDevice:
             build(mirror=bool(o[CONF_MIRROR]), flip=bool(o[CONF_FLIP]), rotation_deg=float(o[CONF_ROTATION]))
         )
 
+    async def _play_default(self) -> None:
+        """Play the chosen default effect, if one is chosen and the lamp is on."""
+        choice = self.options[CONF_ON_EFFECT]
+        if choice in REGISTRY and self.wled_state.get("on"):
+            await self.async_play(choice)
+
     async def async_apply_options(self, options: dict[str, Any]) -> None:
+        previous = self.options[CONF_ON_EFFECT]
         self.options = {**DEFAULTS, **options}
         self.engine.fps = self._fps()
         self.engine.set_globals({"gamma": self.options[CONF_GAMMA], "transition": self.options[CONF_TRANSITION]})
         self._apply_orientation()
         await self._sync_mic()
+        chosen = self.options[CONF_ON_EFFECT]
+        if chosen != previous:
+            # Choosing an effect should show it now, not at the next power-on.
+            if chosen == ON_EFFECT_LAMP and self.engine.running:
+                await self.async_release()
+            elif not self.lining_up:
+                await self._play_default()
         self.notify()
 
     def set_option(self, key: str, value: Any) -> None:
@@ -456,6 +474,8 @@ class GlorbDevice:
         before, self._before_lineup = self._before_lineup, None
         if before:
             await self.async_play(before["effect"], before["params"], 0)
+        elif self.options[CONF_ON_EFFECT] in REGISTRY:
+            await self._play_default()
         else:
             await self.async_release()
 

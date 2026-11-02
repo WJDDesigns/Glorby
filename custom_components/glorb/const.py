@@ -1,6 +1,6 @@
 """Constants for the Glorb integration."""
 DOMAIN = "glorb"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 CONF_FPS = "fps"
 DEFAULT_FPS = 30
