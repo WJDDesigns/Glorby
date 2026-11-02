@@ -379,6 +379,9 @@ class GlorbDevice:
             cfg = await self._get("json/cfg")
             if cfg["um"]["AudioReactive"]["sync"]["mode"] != want:
                 await self.async_wled({"um": {"AudioReactive": {"sync": {"mode": want}}}}, "json/cfg")
+                # The firmware turns Wi-Fi sleep back on after this write, and the
+                # lamp falls off the network with it on. It must be a separate write.
+                await self.async_wled({"wifi": {"sleep": False}}, "json/cfg")
         except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, ValueError) as err:
             _LOGGER.warning("Could not change the lamp's microphone stream: %s", err)
 

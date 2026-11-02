@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components" / "glorb"
 from core.engine import Engine  # noqa: E402
 
 MAX_MISSES = 2
+WATCH_SECONDS = 3600
 
 
 async def health(session: aiohttp.ClientSession, ip: str) -> dict | None:
@@ -45,6 +46,25 @@ async def release(session: aiohttp.ClientSession, ip: str) -> bool:
         return False
 
 
+def stamp() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+async def watch_for_return(session: aiohttp.ClientSession, ip: str, uptime: int, every: float) -> None:
+    """Report how long the lamp stays gone, and whether it rebooted while gone."""
+    gone = time.monotonic()
+    while time.monotonic() - gone < WATCH_SECONDS:
+        await asyncio.sleep(every)
+        sample = await health(session, ip)
+        if sample:
+            print(
+                f"{stamp()} back after {time.monotonic() - gone:.0f} s, uptime {sample['uptime']} "
+                f"(was {uptime}), {'rebooted' if sample['uptime'] < uptime else 'did not reboot'}"
+            )
+            return
+    print(f"{stamp()} still gone after {WATCH_SECONDS} s")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("ip")
@@ -52,6 +72,7 @@ async def main() -> int:
     ap.add_argument("--seconds", type=float, default=30)
     ap.add_argument("--effect", default="eye")
     ap.add_argument("--check-every", type=float, default=3)
+    ap.add_argument("--log-every", type=float, default=60)
     args = ap.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -63,11 +84,14 @@ async def main() -> int:
             return 2
         boot_uptime = first["uptime"]
         for rate in (int(r) for r in args.rates.split(",")):
-            engine = Engine(lambda p: sock.sendto(p, (args.ip, 4048)), fps=rate)
-            engine.play(args.effect)
-            engine.start()
+            # Rate 0 sends nothing, to see whether the lamp stays up on its own.
+            engine = Engine(lambda p: sock.sendto(p, (args.ip, 4048)), fps=max(rate, 1))
+            if rate:
+                engine.play(args.effect)
+                engine.start()
             samples = []
             misses = 0
+            last_log = time.monotonic()
             ended = time.monotonic() + args.seconds
             while time.monotonic() < ended and misses < MAX_MISSES:
                 await asyncio.sleep(args.check_every)
@@ -78,13 +102,17 @@ async def main() -> int:
                     misses = 0
                     samples.append(sample)
                     if sample["uptime"] < boot_uptime:
-                        print(f"{rate} fps: LAMP REBOOTED, uptime {sample['uptime']}")
+                        print(f"{stamp()} {rate} fps: LAMP REBOOTED, uptime {sample['uptime']}")
                         misses = MAX_MISSES
                         break
                     boot_uptime = sample["uptime"]
+                    if time.monotonic() - last_log >= args.log_every:
+                        last_log = time.monotonic()
+                        print(f"{stamp()} {rate} fps: {sample}")
             await engine.stop()
             if misses >= MAX_MISSES:
-                print(f"{rate} fps: FAILED after {len(samples)} good checks, sent at {engine.actual_fps:.1f} fps")
+                print(f"{stamp()} {rate} fps: FAILED after {len(samples)} good checks, sent at {engine.actual_fps:.1f} fps")
+                await watch_for_return(session, args.ip, boot_uptime, args.check_every)
                 return 1
             ms = [s["ms"] for s in samples]
             print(
