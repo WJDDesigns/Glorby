@@ -1,6 +1,6 @@
 """Constants for the Glorb integration."""
 DOMAIN = "glorb"
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 
 CONF_FPS = "fps"
 DEFAULT_FPS = 30
@@ -8,7 +8,7 @@ DEFAULT_FPS = 30
 MAX_FPS = 30
 MIN_FPS = 5
 
-# Orientation is on the device page so it applies live. The rest is under Configure.
+# Anything worth watching change is on the device page. The rest is under Configure.
 CONF_FLIP = "flip"
 CONF_MIRROR = "mirror"
 CONF_ROTATION = "rotation"

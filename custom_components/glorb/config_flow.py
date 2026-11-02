@@ -15,10 +15,6 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
-    SelectOptionDict,
-    SelectSelector,
-    SelectSelectorConfig,
-    SelectSelectorMode,
 )
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
@@ -26,17 +22,12 @@ from .const import (
     CONF_FPS,
     CONF_GAMMA,
     CONF_MICROPHONE,
-    CONF_ON_EFFECT,
     CONF_RESUME,
-    CONF_TRANSITION,
     DEFAULTS,
     DOMAIN,
     MAX_FPS,
     MIN_FPS,
-    ON_EFFECT_LAMP,
-    ON_EFFECT_LAST,
 )
-from .core.effects import REGISTRY
 
 
 async def _probe(flow: ConfigFlow, host: str) -> dict[str, Any] | None:
@@ -106,7 +97,7 @@ class GlorbConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class GlorbOptionsFlow(OptionsFlow):
-    """Settings that are chosen once. Orientation is on the device page."""
+    """Settings that are chosen once. Everything live is on the device page."""
 
     def _current(self) -> dict[str, Any]:
         return {**DEFAULTS, **self.config_entry.options}
@@ -133,27 +124,16 @@ class GlorbOptionsFlow(OptionsFlow):
                 return self.async_create_entry(data=options)
             host = new_host
             current.update(user_input)
-        effects = [
-            SelectOptionDict(value=ON_EFFECT_LAST, label="Last effect played"),
-            SelectOptionDict(value=ON_EFFECT_LAMP, label="The lamp's own effect"),
-            *(SelectOptionDict(value=fx.id, label=fx.name) for fx in REGISTRY.values() if fx.id != "calibrate"),
-        ]
         return self.async_show_form(
             step_id="init",
             errors=errors,
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_HOST, default=host): str,
-                    vol.Required(CONF_ON_EFFECT, default=current[CONF_ON_EFFECT]): SelectSelector(
-                        SelectSelectorConfig(options=effects, mode=SelectSelectorMode.DROPDOWN)
-                    ),
                     vol.Required(CONF_RESUME, default=current[CONF_RESUME]): bool,
                     vol.Required(CONF_MICROPHONE, default=current[CONF_MICROPHONE]): bool,
                     vol.Required(CONF_FPS, default=current[CONF_FPS]): NumberSelector(
                         NumberSelectorConfig(min=MIN_FPS, max=MAX_FPS, step=1, mode=NumberSelectorMode.SLIDER)
-                    ),
-                    vol.Required(CONF_TRANSITION, default=current[CONF_TRANSITION]): NumberSelector(
-                        NumberSelectorConfig(min=0, max=15, step=0.1, mode=NumberSelectorMode.SLIDER, unit_of_measurement="s")
                     ),
                     vol.Required(CONF_GAMMA, default=current[CONF_GAMMA]): NumberSelector(
                         NumberSelectorConfig(min=1, max=3.5, step=0.05, mode=NumberSelectorMode.SLIDER)

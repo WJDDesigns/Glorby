@@ -460,6 +460,9 @@ class GlorbDevice:
                 await self._play_default()
         self.notify()
 
+    def current_params(self) -> dict[str, Any]:
+        return self.engine.current.p if self.engine.current else {}
+
     def set_option(self, key: str, value: Any) -> None:
         """Save one setting. The entry's update listener applies it."""
         entry = self.hass.config_entries.async_get_entry(self.entry_id)

@@ -14,7 +14,7 @@ from .const import DOMAIN, PANEL_PATH, STATIC_URL, VERSION
 from .device import GlorbDevice
 from .websocket_api import async_register_commands
 
-PLATFORMS = [Platform.LIGHT, Platform.NUMBER, Platform.SWITCH]
+PLATFORMS = [Platform.LIGHT, Platform.NUMBER, Platform.SELECT, Platform.SWITCH]
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
