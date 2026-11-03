@@ -216,6 +216,7 @@ class GlorbDevice:
                 misses = 0
                 self.available = True
                 self._note_uptime()
+                await self._resume_after_fault()
                 self.notify()
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                 misses += 1
@@ -228,6 +229,15 @@ class GlorbDevice:
                     await self.engine.stop()
                 self.available = False
                 self.notify()
+
+    async def _resume_after_fault(self) -> None:
+        """Pick the effect back up once the lamp answers again after an outage stopped it."""
+        resume = self.saved.get("resume")
+        if not self.fault or self.engine.running or not self.options[CONF_RESUME] or not resume:
+            return
+        if resume["effect"] in REGISTRY:
+            _LOGGER.info("The lamp is back, resuming %s", resume["effect"])
+            await self.async_play(resume["effect"], resume.get("params"))
 
     def _note_uptime(self) -> None:
         """Catch the lamp restarting by itself, since it doesn't report why."""
