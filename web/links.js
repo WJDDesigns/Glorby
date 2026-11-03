@@ -8,6 +8,11 @@ const RETRY_MS = 3000;
 // Each frame goes to the lamp as JSON, which the firmware can take about this often.
 const LAMP_FPS = 20;
 const LAMP_BACKLOG = 4096;
+// While a page plays effects on a lamp, it names the lamp's segment after itself. Another
+// page or device that sees a different name there knows it has been taken over and stops,
+// so two pages never paint the lamp at once.
+const CLAIM = "Glorby ";
+const CLAIM_CHECK_MS = 2500;
 
 async function lampMap() {
   const response = await fetch(new URL("./lamp-map.json", import.meta.url));
@@ -34,6 +39,14 @@ export class WledLink {
       onChange: () => this._emit(this.available),
       onRelease: () => this._handBack(),
     });
+    this.token = Math.random().toString(36).slice(2, 8);
+    // Other tabs in this browser hear about a takeover at once, without waiting on the lamp.
+    this.channel = typeof BroadcastChannel === "function" ? new BroadcastChannel(`glorby:${this.base}`) : null;
+    if (this.channel) {
+      this.channel.onmessage = ({ data }) => {
+        if (data?.claim && data.claim !== this.token) this._yield();
+      };
+    }
   }
 
   async _get(path) {
@@ -117,6 +130,11 @@ export class WledLink {
     const now = performance.now();
     if (!this.cells || socket?.readyState !== WebSocket.OPEN) return;
     // A slow lamp gets fewer frames rather than a growing queue.
+    // Checked from the frame loop, which keeps going in a background tab when timers slow down.
+    if (now - (this.checkedAt || 0) > CLAIM_CHECK_MS) {
+      this.checkedAt = now;
+      this._checkClaim();
+    }
     if (now - (this.sentAt || 0) < 1000 / LAMP_FPS - 2 || socket.bufferedAmount > LAMP_BACKLOG) return;
     this.sentAt = now;
     // Colors go to the lamp's matrix cells. Cells with no LED stay black.
@@ -127,10 +145,76 @@ export class WledLink {
     socket.send(JSON.stringify({ seg: { i: cells } }));
   }
 
-  /** Give the lamp back its own effect after effects here stop. */
+  _mainSegment() {
+    const { state } = this.lamp;
+    return state.mainseg ?? (state.seg || [])[0]?.id ?? 0;
+  }
+
+  /**
+   * Take the lamp for effects played here. Tells other pages to stop, makes the lamp ignore
+   * live data from anywhere else (Home Assistant streams that), and turns off any other
+   * segment so only this page's frames show.
+   */
+  async _claim() {
+    this.channel?.postMessage({ claim: this.token });
+    const main = this._mainSegment();
+    const segments = this.lamp.state.seg || [];
+    if (!this.claim) {
+      const current = segments.find((seg) => seg.id === main) || {};
+      this.claim = {
+        name: String(current.n || "").startsWith(CLAIM) ? "" : current.n || "",
+        others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
+      };
+    }
+    this.claimed = `${CLAIM}${this.token}`;
+    await this._post({
+      on: true,
+      lor: 2,
+      seg: [{ id: main, n: this.claimed }, ...this.claim.others.map((id) => ({ id, on: false }))],
+    });
+    this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
+    this.checkedAt = performance.now();
+  }
+
+  /** True when the lamp's state shows another Glorby page has claimed it. */
+  _takenBy(state) {
+    const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
+    const name = String(main?.n || "");
+    return !!this.claimed && name.startsWith(CLAIM) && name !== this.claimed;
+  }
+
+  /** Stop if another page or device has taken the lamp since. */
+  async _checkClaim() {
+    if (!this.local.running || !this.claimed) return;
+    try {
+      if (this._takenBy(await this._get("/json/state"))) this._yield();
+    } catch {
+      // The lamp being briefly unreachable isn't a takeover.
+    }
+  }
+
+  /** Another page took the lamp: stop here and leave the lamp to it. */
+  _yield() {
+    if (!this.local.running) return;
+    this.claimed = null;
+    this.claim = null;
+    this.local.onRelease = () => {};
+    this.local.release();
+    this.local.onRelease = () => this._handBack();
+    this.local.fault = "Another window or device is playing effects on this lamp now";
+    this._emit(this.available);
+  }
+
+  /** Give the lamp back its own effect, and live data back to Home Assistant, after effects here stop. */
   _handBack() {
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
-    return this._post({ seg: [{ frz: false }] }).catch(() => {});
+    const claim = this.claim || { name: "", others: [] };
+    this.claim = null;
+    this.claimed = null;
+    return this._post({
+      lor: 0,
+      seg: [{ id: this._mainSegment(), frz: false, n: claim.name }, ...claim.others.map((id) => ({ id, on: true }))],
+    }).catch(() => {});
   }
 
   _open() {
@@ -145,7 +229,10 @@ export class WledLink {
       this.heard = Date.now();
       if (typeof event.data === "string") {
         const data = JSON.parse(event.data);
-        if (data.state) this.lamp.state = data.state;
+        if (data.state) {
+          this.lamp.state = data.state;
+          if (this._takenBy(data.state)) this._yield();
+        }
         if (data.info) this.lamp.info = data.info;
         this._emit(true);
         return;
@@ -205,9 +292,8 @@ export class WledLink {
       if (extra.on === false) this.local.release();
       return this._post(extra);
     }
-    if (type === "glorb/play" || type === "glorb/look_play") {
-      await this._post({ on: true });
-      this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
+    if (type === "glorb/play" || type === "glorb/look_play" || (type === "glorb/alert" && !this.local.running)) {
+      await this._claim();
     }
     if (this.local.handle(type, extra)) return undefined;
     if (type === "glorb/wled") {
@@ -215,8 +301,7 @@ export class WledLink {
         this.local.onRelease = () => {};
         this.local.release();
         this.local.onRelease = () => this._handBack();
-        this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
-        await this._post({ seg: [{ frz: false }] });
+        await this._handBack();
       }
       if (extra.preset !== undefined) return this._post({ ps: extra.preset });
       if (extra.fx !== undefined) return this._post({ seg: [{ fx: extra.fx }] });
