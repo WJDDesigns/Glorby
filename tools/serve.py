@@ -375,10 +375,57 @@ def version() -> str:
     return f"{head}-{int(newest)}"
 
 
+# What the settings page shows about updates.
+status = {"auto": False, "checked": None, "message": "Not checked yet"}
+update_lock = threading.Lock()
+
+
+def build() -> dict:
+    """The version people see: the integration's number, plus the exact commit it's built from."""
+    try:
+        number = json.loads((ROOT / "custom_components" / "glorb" / "manifest.json").read_text())["version"]
+    except (OSError, ValueError, KeyError):
+        number = "dev"
+    info = {"number": number, "version": version(), **status}
+    try:
+        info.update(
+            commit=git("rev-parse", "--short", "HEAD"),
+            date=git("log", "-1", "--format=%cI"),
+            subject=git("log", "-1", "--format=%s"),
+            branch=git("rev-parse", "--abbrev-ref", "HEAD"),
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+    return info
+
+
+def check_for_update(server: ThreadingHTTPServer | None = None) -> dict:
+    """Pull a new version if there is one, and say what happened. Restarts the helper if it changed itself."""
+    with update_lock:
+        try:
+            changed = update_once()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as err:
+            status.update(checked=time.time(), message=f"Couldn't check: {err}")
+            return {"updated": False, "message": status["message"]}
+        status["checked"] = time.time()
+        if not changed:
+            status["message"] = "Up to date"
+            return {"updated": False, "message": "Up to date"}
+        summary = git("log", "-1", "--format=%h %s")
+        status["message"] = f"Updated to {summary}"
+        print(status["message"])
+        if server and "tools/serve.py" in changed.splitlines():
+            print("The helper itself changed, so it's restarting.")
+            restart.set()
+            threading.Thread(target=server.shutdown, daemon=True).start()
+        return {"updated": True, "message": status["message"]}
+
+
 def update_once() -> str | None:
     """Fast-forward to the newest commit on this branch. Returns what changed, or None."""
     if git("status", "--porcelain", "--untracked-files=no"):
-        return None  # Someone is editing here, so leave their work alone.
+        # Someone is editing here, so leave their work alone.
+        raise RuntimeError("this copy has local changes, so it isn't updated automatically")
     git("fetch", "--quiet")
     before = git("rev-parse", "HEAD")
     try:
@@ -393,21 +440,10 @@ def update_once() -> str | None:
 
 def keep_updated(server: ThreadingHTTPServer) -> None:
     """Pull new versions in the background. Pages reload themselves; the helper restarts itself if it changed."""
-    while True:
+    status["auto"] = True
+    while not restart.is_set():
         time.sleep(UPDATE_EVERY)
-        try:
-            changed = update_once()
-        except (OSError, RuntimeError, subprocess.SubprocessError) as err:
-            print(f"Couldn't check for updates: {err}")
-            continue
-        if not changed:
-            continue
-        print(f"Updated to {git('log', '-1', '--format=%h %s')}")
-        if "tools/serve.py" in changed.splitlines():
-            print("The helper itself changed, so it's restarting.")
-            restart.set()
-            server.shutdown()
-            return
+        check_for_update(server)
 
 
 def install() -> None:
@@ -464,23 +500,27 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
         if path == "/api/version":
-            body = json.dumps({"version": version()}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._json(build() if "full" in self.path else {"version": version()})
             return
         if path == "/api/discover":
             query = urllib.parse.parse_qs(self.path.partition("?")[2])
-            body = json.dumps(discover(query.get("hint", []), "deep" in query)).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._json(discover(query.get("hint", []), "deep" in query))
             return
         super().do_GET()
+
+    def do_POST(self) -> None:
+        if self.path.split("?", 1)[0] == "/api/update":
+            self._json(check_for_update(self.server))
+            return
+        self.send_error(404)
+
+    def _json(self, data: dict) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def end_headers(self) -> None:
         # Always check for a newer copy, so an update shows up on the next reload.

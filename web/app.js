@@ -2,6 +2,7 @@
 import "../custom_components/glorb/frontend/glorb-ui.js";
 import { DemoLink, HomeAssistantLink, WledLink } from "./links.js";
 import { findHomeAssistant, findLamps } from "./discover.js";
+import { footer, openSettings } from "./settings.js";
 
 const app = document.querySelector("#app");
 const SAVED = "glorby.connection";
@@ -42,14 +43,10 @@ function makeLink(saved) {
 function openStudio(link) {
   stopSearch();
   link.decorateHead = (head) => {
-    const change = document.createElement("button");
-    change.textContent = "Change lamp";
-    change.addEventListener("click", () => {
-      const before = recall();
-      remember(null);
-      showChoices({ hints: before?.address ? [before.address] : [] });
-    });
-    head.append(change);
+    const settings = document.createElement("button");
+    settings.textContent = "Settings";
+    settings.addEventListener("click", () => openSettings({ link, actions: connectActions() }));
+    head.append(settings);
   };
   app.replaceChildren();
   const studio = document.createElement("glorb-studio");
@@ -113,6 +110,42 @@ function showForm({ title, fields, kind }) {
   app.replaceChildren(form);
   form.querySelector("input").focus();
   return form;
+}
+
+const lampForm = () => showForm({
+  title: "Lamp on my network",
+  kind: "lamp",
+  fields: [field("Lamp address", "address", { placeholder: "192.168.1.50", inputMode: "url" })],
+});
+
+async function homeAssistantForm() {
+  const form = showForm({
+    title: "Home Assistant",
+    kind: "home-assistant",
+    fields: [
+      field("Home Assistant address", "address", { placeholder: "192.168.1.10:8123", inputMode: "url" }),
+      field("Long-lived access token", "token", { type: "password" }),
+    ],
+  });
+  const address = form.elements.address;
+  const guess = await findHomeAssistant();
+  if (guess && !address.value && form.isConnected) {
+    address.value = guess;
+    form.elements.token.focus();
+  }
+}
+
+/** The ways to connect, shared by the connect screen and Settings. */
+function connectActions() {
+  return {
+    findLamps: () => {
+      const before = recall();
+      showChoices({ hints: before?.address ? [before.address] : [] });
+    },
+    enterAddress: lampForm,
+    homeAssistant: homeAssistantForm,
+    demo: () => openStudio(new DemoLink()),
+  };
 }
 
 function choiceButton(title, detail, action) {
@@ -219,28 +252,10 @@ function showChoices({ hints = [], reconnect = null } = {}) {
   other.textContent = "Or connect another way";
   page.append(other);
   page.append(
-    choiceButton("Enter a lamp's address", "If it didn't turn up above", () => showForm({
-      title: "Lamp on my network",
-      kind: "lamp",
-      fields: [field("Lamp address", "address", { placeholder: "192.168.1.50", inputMode: "url" })],
-    })),
-    choiceButton("Home Assistant", "Use the Glorb integration you already run", async () => {
-      const form = showForm({
-        title: "Home Assistant",
-        kind: "home-assistant",
-        fields: [
-          field("Home Assistant address", "address", { placeholder: "192.168.1.10:8123", inputMode: "url" }),
-          field("Long-lived access token", "token", { type: "password" }),
-        ],
-      });
-      const address = form.elements.address;
-      const guess = await findHomeAssistant();
-      if (guess && !address.value && form.isConnected) {
-        address.value = guess;
-        form.elements.token.focus();
-      }
-    }),
+    choiceButton("Enter a lamp's address", "If it didn't turn up above", lampForm),
+    choiceButton("Home Assistant", "Use the Glorb integration you already run", homeAssistantForm),
     choiceButton("Try it without a lamp", "A pretend lamp to look around with", () => openStudio(new DemoLink())),
+    footer(connectActions()),
   );
   app.replaceChildren(page);
 }
