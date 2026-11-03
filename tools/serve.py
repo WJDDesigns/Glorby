@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -96,10 +97,26 @@ def questions(data: bytes) -> list[tuple[str, int]]:
 # ---------------------------------------------------------------- finding lamps
 
 
+# Addresses where something answered at all (a page, an error, a refused connection).
+# A working network always has some; none at all means this program is being kept off it.
+answered: set[str] = set()
+
+
 def fetch_info(host: str, timeout: float = 1.5) -> dict | None:
     try:
         with urllib.request.urlopen(f"http://{host}/json/info", timeout=timeout) as response:
+            answered.add(host)
             info = json.load(response)
+    except urllib.error.HTTPError:
+        answered.add(host)
+        return None
+    except urllib.error.URLError as err:
+        if isinstance(err.reason, ConnectionRefusedError):
+            answered.add(host)
+        return None
+    except ConnectionRefusedError:
+        answered.add(host)
+        return None
     except (OSError, ValueError):
         return None
     return info if isinstance(info, dict) and info.get("leds") else None
@@ -194,21 +211,21 @@ def gateway() -> str | None:
     return None
 
 
-def network_blocked() -> bool:
+def network_blocked(hosts: list[str]) -> bool:
     """True when macOS's Local Network privacy setting keeps this program off the network.
 
-    A blocked program gets "no route to host" even from the router, which always
-    answers (or refuses) on a working network.
+    On a working network something always answers, if only the router turning the
+    connection away. A blocked program hears nothing from anyone, even the router.
     """
-    if platform.system() != "Darwin":
+    if platform.system() != "Darwin" or answered.intersection(hosts):
         return False
     router = gateway()
-    if not router:
-        return False
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1.5)
-        code = s.connect_ex((router, 80))
-    return code in (errno.EHOSTUNREACH, errno.EPERM, errno.EACCES)
+    if router:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.5)
+            if s.connect_ex((router, 80)) in (0, errno.ECONNREFUSED):
+                return False
+    return True
 
 
 def is_private(ip: str) -> bool:
@@ -312,7 +329,7 @@ def discover(hints: list[str] = (), deep: bool = False) -> dict:
         })
     keep_known(lamps)
     result = {"lamps": lamps, "others": others, "searched": len(hosts), "deep": deep}
-    if not lamps and not others and network_blocked():
+    if not lamps and not others and network_blocked(hosts):
         result["blocked"] = (
             "macOS is keeping Glorby's helper off your network. Open System Settings, "
             "Privacy & Security, Local Network, and turn on Python. Then search again."
