@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components" / "glorb"))
 
 from core.audio import AudioState, _V2, parse_packet  # noqa: E402
-from core.effects import REGISTRY, Audio, moon_phase, subsolar_point  # noqa: E402
+from core.effects import REGISTRY, SWEEP_DIRECTIONS, Audio, moon_phase, subsolar_point, sweep_mask  # noqa: E402
 from core.engine import DDP_HEADER, Engine  # noqa: E402
 from core.geometry import LEDMAP  # noqa: E402
 
@@ -68,6 +68,37 @@ def test_matrix_falls_from_the_top_and_lights_nothing_ahead_of_it():
     down = np.pi / 2 - e.geo.lat
     assert colors.sum(axis=1)[down < fx.head[0]].max() > 0
     assert colors.sum(axis=1)[down > fx.head[0]].max() == 0
+
+
+def _band_height(e, passes, direction):
+    mask = sweep_mask(e.geo.lat, e.geo.lon, direction, passes, 0.5)
+    return float((e.geo.lat * mask).sum() / mask.sum())
+
+
+def test_sweep_directions_move_the_right_way():
+    e = engine()
+    assert _band_height(e, 0.3, "Up") < _band_height(e, 0.7, "Up")
+    assert _band_height(e, 0.3, "Down") > _band_height(e, 0.7, "Down")
+    assert _band_height(e, 0.25, "Up and down") < _band_height(e, 0.75, "Up and down")
+    assert _band_height(e, 1.25, "Up and down") > _band_height(e, 1.75, "Up and down")
+    right = sweep_mask(e.geo.lat, e.geo.lon, "Right", 0.1, 0.5)
+    assert abs(float(e.geo.lon[right.argmax()]) - 0.1 * 2 * np.pi) < 1.0
+    left = sweep_mask(e.geo.lat, e.geo.lon, "Left", 0.1, 0.5)
+    assert abs(float(e.geo.lon[left.argmax()]) + 0.1 * 2 * np.pi) < 1.0
+
+
+@pytest.mark.parametrize("direction", SWEEP_DIRECTIONS)
+def test_sweep_effect_and_alert_follow_their_settings(direction):
+    e = engine()
+    e.play("sweep", {"direction": direction, "color": "#ffffff", "background": "#000000"})
+    lit = [sum(e.step(1 / 30)[0]) for _ in range(120)]
+    assert max(lit) > 0
+    e.play("solid", {"color": "#000000"}, transition=0)
+    e.alert("sweep", "#ffffff", "#000000", 2.0, 1.0, direction, 2.0, 0.8)
+    overlay = e.overlays[0]
+    assert (overlay.direction, overlay.speed, overlay.width) == (direction, 2.0, 0.8)
+    lit = [sum(e.step(1 / 30)[0]) for _ in range(30)]
+    assert max(lit) > 0
 
 
 def test_packet_only_writes_real_cells():

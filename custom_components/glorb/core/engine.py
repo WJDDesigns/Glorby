@@ -12,7 +12,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import palettes
-from .effects import REGISTRY, Audio, Ctx, Effect
+from .effects import REGISTRY, SWEEP_DIRECTIONS, SWEEP_PASSES, Audio, Ctx, Effect, sweep_mask
 from .geometry import CELLS, LED_COUNT, Geometry, build
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ class Overlay:
     duration: float
     origin: np.ndarray
     opacity: float = 1.0
+    direction: str = SWEEP_DIRECTIONS[0]
+    speed: float = 1.0
+    width: float = 0.5
 
 
 OVERLAY_PATTERNS = ("pulse", "flash", "ring", "sweep", "split", "spin")
@@ -139,6 +142,9 @@ class Engine:
         color2: str = "#000000",
         duration: float = 3.0,
         opacity: float = 1.0,
+        direction: str = SWEEP_DIRECTIONS[0],
+        speed: float = 1.0,
+        width: float = 0.5,
     ) -> None:
         self.overlays.append(
             Overlay(
@@ -149,6 +155,9 @@ class Engine:
                 max(0.1, duration),
                 self.rng.normal(size=3),
                 max(0.0, min(1.0, opacity)),
+                direction if direction in SWEEP_DIRECTIONS else SWEEP_DIRECTIONS[0],
+                max(0.0, min(4.0, speed)),
+                max(0.15, min(1.5, width)),
             )
         )
 
@@ -198,7 +207,7 @@ class Engine:
                 angle = np.arccos(np.clip(pos @ origin, -1, 1))
                 mask = np.exp(-(((angle - (age * 2.4) % math.pi) / 0.4) ** 2))
             elif o.pattern == "sweep":
-                mask = np.exp(-(((pos[:, 2] - math.sin(age * 3)) / 0.4) ** 2))
+                mask = sweep_mask(self.geo.lat, self.geo.lon, o.direction, age * o.speed * SWEEP_PASSES, o.width)
             elif o.pattern == "split":
                 mask = (pos[:, 2] > math.sin(age * 2.0) * 0.3).astype(float)
             elif o.pattern == "spin":

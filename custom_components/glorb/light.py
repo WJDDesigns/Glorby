@@ -20,7 +20,7 @@ from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_ON_EFFECT, DOMAIN, ON_EFFECT_LAMP, ON_EFFECT_LAST
-from .core.effects import REGISTRY
+from .core.effects import REGISTRY, SWEEP_DIRECTIONS
 from .core.engine import OVERLAY_PATTERNS
 from .device import GlorbDevice
 
@@ -68,6 +68,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             vol.Optional("color2", default="#000000"): cv.string,
             vol.Optional("duration", default=3.0): vol.Coerce(float),
             vol.Optional("opacity", default=1.0): vol.Coerce(float),
+            vol.Optional("direction", default=SWEEP_DIRECTIONS[0]): vol.In(SWEEP_DIRECTIONS),
+            vol.Optional("speed", default=1.0): vol.Coerce(float),
+            vol.Optional("width", default=0.5): vol.Coerce(float),
         },
         "async_service_alert",
     )
@@ -196,8 +199,10 @@ class GlorbLight(LightEntity):
     async def async_service_globals(self, **values: Any) -> None:
         self.device.async_set_globals(values)
 
-    async def async_service_alert(self, pattern: str, color: str, color2: str, duration: float, opacity: float) -> None:
-        await self.device.async_alert(pattern, color, color2, duration, opacity)
+    async def async_service_alert(
+        self, pattern: str, color: str, color2: str, duration: float, opacity: float, direction: str, speed: float, width: float
+    ) -> None:
+        await self.device.async_alert(pattern, color, color2, duration, opacity, direction, speed, width)
 
     async def async_service_look(self, name: str) -> None:
         await self.device.async_play_look(name)

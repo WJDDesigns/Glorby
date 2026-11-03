@@ -39,7 +39,7 @@ from .const import (
     VIEW_EVERY_SECONDS,
 )
 from .core.audio import AudioState, listen
-from .core.effects import REGISTRY
+from .core.effects import REGISTRY, SWEEP_DIRECTIONS
 from .core.engine import Engine
 from .core.geometry import CELLS, MATRIX_H, MATRIX_W, build
 
@@ -320,7 +320,17 @@ class GlorbDevice:
             await self.async_load_picture(str(fx.p["source"]))
         self.notify()
 
-    async def async_alert(self, pattern: str, color: str, color2: str, duration: float, opacity: float = 1.0) -> None:
+    async def async_alert(
+        self,
+        pattern: str,
+        color: str,
+        color2: str,
+        duration: float,
+        opacity: float = 1.0,
+        direction: str = SWEEP_DIRECTIONS[0],
+        speed: float = 1.0,
+        width: float = 0.5,
+    ) -> None:
         """Play an alert over the current effect."""
         if not self.engine.running:
             # Alerts need the engine, so give the lamp back to its own effect afterward.
@@ -328,7 +338,7 @@ class GlorbDevice:
             await self.async_play("solid", {"color": "#000000"}, 0)
             self.saved["resume"] = resume
             self.hass.loop.call_later(duration, lambda: self.hass.async_create_task(self._end_alert()))
-        self.engine.alert(pattern, color, color2, duration, opacity)
+        self.engine.alert(pattern, color, color2, duration, opacity, direction, speed, width)
 
     async def _end_alert(self) -> None:
         if not self.engine.overlays or self.engine.overlays[-1].started + self.engine.overlays[-1].duration <= self.engine.clock + 0.2:

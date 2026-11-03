@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
 from .core import palettes
-from .core.effects import CATEGORIES, REGISTRY
+from .core.effects import CATEGORIES, REGISTRY, SWEEP_DIRECTIONS
 from .core.engine import OVERLAY_PATTERNS
 from .device import GlorbDevice
 
@@ -54,6 +54,7 @@ def ws_catalog(hass, connection, msg) -> None:
             "effects": [fx.describe() for fx in REGISTRY.values()],
             "palettes": palettes.stops(),
             "patterns": list(OVERLAY_PATTERNS),
+            "sweep_directions": list(SWEEP_DIRECTIONS),
             "wled_effects": device.wled_effects,
             "wled_palettes": device.wled_palettes,
             "wled_presets": device.wled_presets,
@@ -140,7 +141,16 @@ ws_globals = _simple({vol.Required("type"): "glorb/globals", vol.Required("value
 
 
 async def _alert(device: GlorbDevice, msg: dict[str, Any]) -> None:
-    await device.async_alert(msg["pattern"], msg["color"], msg["color2"], msg["duration"], msg.get("opacity", 1.0))
+    await device.async_alert(
+        msg["pattern"],
+        msg["color"],
+        msg["color2"],
+        msg["duration"],
+        msg.get("opacity", 1.0),
+        msg.get("direction", SWEEP_DIRECTIONS[0]),
+        msg.get("speed", 1.0),
+        msg.get("width", 0.5),
+    )
 
 
 ws_alert = _simple(
@@ -151,6 +161,9 @@ ws_alert = _simple(
         vol.Required("color2"): str,
         vol.Required("duration"): vol.Coerce(float),
         vol.Optional("opacity"): vol.Coerce(float),
+        vol.Optional("direction"): vol.In(SWEEP_DIRECTIONS),
+        vol.Optional("speed"): vol.Coerce(float),
+        vol.Optional("width"): vol.Coerce(float),
     },
     _alert,
 )

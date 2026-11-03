@@ -240,7 +240,7 @@ class GlorbPanel extends HTMLElement {
     this.tab = "effects";
     this.category = "Worlds";
     this.wledFilter = "";
-    this.alertForm = { pattern: "pulse", color: "#ff0000", color2: "#000000", duration: 4 };
+    this.alertForm = { pattern: "pulse", color: "#ff0000", color2: "#000000", duration: 4, direction: "Up and down", speed: 1, width: 0.5 };
     this._timers = {};
   }
 
@@ -627,11 +627,18 @@ class GlorbPanel extends HTMLElement {
   _tabAlerts(body) {
     const form = this.alertForm;
     const fields = this._el(`<div class="fields"></div>`);
-    fields.append(this._field({ name: "Pattern", kind: "choice", options: this.catalog.patterns }, form.pattern, (v) => { form.pattern = v; }));
+    const sweep = this._el(`<div class="fields"></div>`);
+    const showSweep = () => { sweep.style.display = form.pattern === "sweep" ? "" : "none"; };
+    sweep.append(this._field({ name: "Direction", kind: "choice", options: this.catalog.sweep_directions }, form.direction, (v) => { form.direction = v; }));
+    sweep.append(this._field({ name: "Speed", kind: "range", min: 0, max: 4, step: 0.05 }, form.speed, (v) => { form.speed = v; }));
+    sweep.append(this._field({ name: "Width", kind: "range", min: 0.15, max: 1.5, step: 0.01 }, form.width, (v) => { form.width = v; }));
+    showSweep();
+    fields.append(this._field({ name: "Pattern", kind: "choice", options: this.catalog.patterns }, form.pattern, (v) => { form.pattern = v; showSweep(); }));
     fields.append(this._field({ name: "Color", kind: "color" }, form.color, (v) => { form.color = v; }));
     fields.append(this._field({ name: "Second color", kind: "color" }, form.color2, (v) => { form.color2 = v; }));
     fields.append(this._field({ name: "Seconds", kind: "range", min: 0.5, max: 30, step: 0.5 }, form.duration, (v) => { form.duration = v; }));
     body.append(fields);
+    body.append(sweep);
     body.append(this._button("Play alert", () => this._call("glorb/alert", { ...form })));
   }
 

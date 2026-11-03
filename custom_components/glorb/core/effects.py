@@ -105,6 +105,26 @@ def _unit(v: np.ndarray) -> np.ndarray:
     return v / max(float(np.linalg.norm(v)), 1e-9)
 
 
+SWEEP_DIRECTIONS = ("Up and down", "Up", "Down", "Left", "Right")
+SWEEP_PASSES = 0.6  # per second at speed 1
+
+
+def sweep_mask(lat: np.ndarray, lon: np.ndarray, direction: str, passes: float, width: float) -> np.ndarray:
+    """A soft band crossing the sphere, after this many passes have gone by."""
+    if direction in ("Left", "Right"):
+        center = math.tau * (passes % 1.0) * (1 if direction == "Right" else -1)
+        off = (lon - center + math.pi) % math.tau - math.pi
+    elif direction == "Up and down":
+        bounce = passes % 2.0
+        off = lat - (min(bounce, 2.0 - bounce) * math.pi - math.pi / 2)
+    else:
+        # Start and finish fully off the sphere, so each pass leaves it clear.
+        margin = width * 1.5
+        center = (passes % 1.0) * (math.pi + 2 * margin) - math.pi / 2 - margin
+        off = lat - (center if direction == "Up" else -center)
+    return np.exp(-((off / width) ** 2))
+
+
 _PERM_RNG = np.random.default_rng(1337)
 _PERM = _PERM_RNG.permutation(256)
 _PERM = np.concatenate([_PERM, _PERM, _PERM])
@@ -672,6 +692,29 @@ class _Trail(Effect):
 
     def _fade(self, ctx: Ctx, decay: float) -> None:
         self.buffer *= math.exp(-ctx.dt * decay)
+
+
+@effect
+class Sweep(Effect):
+    id = "sweep"
+    name = "Sweep"
+    category = "Geometry"
+    params = (
+        _speed(),
+        Param("direction", "Direction", "choice", SWEEP_DIRECTIONS[0], options=SWEEP_DIRECTIONS),
+        Param("width", "Width", "range", 0.5, 0.15, 1.5, 0.01),
+        Param("color", "Color", "color", "#ff0000"),
+        Param("background", "Background", "color", "#000000"),
+    )
+
+    def __init__(self, geo, rng) -> None:
+        super().__init__(geo, rng)
+        self.passes = 0.0
+
+    def render(self, ctx):
+        self.passes += ctx.dt * self.p["speed"] * SWEEP_PASSES
+        mask = sweep_mask(ctx.lat, ctx.lon, self.p["direction"], self.passes, self.p["width"])[:, None]
+        return palettes.color(self.p["color"]) * mask + palettes.color(self.p["background"]) * (1 - mask)
 
 
 @effect
