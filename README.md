@@ -28,9 +28,13 @@ address and reconnects on its own.
 - **Port.** It uses port 80 so the address needs no number. If 80 is taken, or Linux
   won't allow it without root, it uses 5180 and prints `http://glorby.local:5180`.
   Choose with `--port`, change the name with `--name`, turn it off with `--no-name`.
-- **How it finds lamps.** It asks for WLED's mDNS service (`_wled._tcp`) and checks
-  `/json/info` on every address in this computer's /24, keeping the lamps whose
-  firmware version says GLORB. `python3 tools/serve.py --discover` prints what it finds.
+- **How it finds lamps.** A quick search (about 3 seconds) asks for WLED's mDNS
+  service (`_wled._tcp`) and checks `/json/info` across this computer's own network
+  and wherever a lamp was found before (kept in `~/.glorby/lamps.json`). If that finds
+  nothing, a deep search (about 20 seconds) also checks the neighbouring ranges and the
+  usual router defaults, which catches lamps a router keeps on their own range, such as
+  192.168.4.x beside 192.168.1.x. Lamps are the WLED devices whose firmware version
+  says GLORB. `python3 tools/serve.py --discover --deep` prints what it finds.
 - **The friendly name.** On a Mac it registers `glorby.local` with the system's own
   mDNS service (`dns-sd`), on Linux with Avahi when installed, and otherwise answers
   mDNS itself. Android before 12 and some older Windows setups don't look up `.local`

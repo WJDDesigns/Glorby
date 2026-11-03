@@ -51,8 +51,11 @@ async function getJson(url, ms, signal) {
 }
 
 /** Asks the helper that served this page, if there is one. Returns null when there isn't. */
-async function askHelper(signal) {
-  const result = await getJson(new URL("/api/discover", location.href), 15000, signal);
+async function askHelper(hints, deep, signal) {
+  const url = new URL("/api/discover", location.href);
+  hints.forEach((hint) => url.searchParams.append("hint", hint));
+  if (deep) url.searchParams.set("deep", "1");
+  const result = await getJson(url, deep ? 45000 : 15000, signal);
   return Array.isArray(result?.lamps) ? result : null;
 }
 
@@ -73,9 +76,16 @@ export async function findLamps({ hints = [], onLamp = () => {}, onProgress = ()
   };
 
   onProgress("Asking the network");
-  const helper = await askHelper(signal);
+  const hintHosts = [location.hostname, ...hints.map(hostOf)].filter(Boolean);
+  let helper = await askHelper(hintHosts, false, signal);
   if (helper) {
     helper.lamps.forEach(report);
+    if (!found.size && !signal?.aborted) {
+      // Routers often keep lights on a range of their own, so look next door too.
+      onProgress("Searching nearby networks");
+      helper = (await askHelper(hintHosts, true, signal)) || helper;
+      helper.lamps.forEach(report);
+    }
     return { lamps: [...found.values()], via: "helper", others: helper.others || 0 };
   }
 
@@ -107,7 +117,6 @@ export async function findLamps({ hints = [], onLamp = () => {}, onProgress = ()
     await Promise.all(Array.from({ length: Math.min(AT_ONCE, hosts.length) }, worker));
   };
 
-  const hintHosts = [location.hostname, ...hints.map(hostOf)].filter(Boolean);
   onProgress("Checking lamps you've used before");
   await sweep([...new Set([...hintHosts.filter((h) => h !== "localhost" && h !== "127.0.0.1"), ...NAMES])]);
 

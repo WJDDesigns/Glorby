@@ -5,7 +5,7 @@
 
 Browsers can't search a network themselves, so this does it for them: the app asks
 /api/discover, and this looks for WLED's mDNS service and checks every address on
-the local network for a lamp. Only the Python standard library is needed.
+the local network for a lamp, then the ranges next to it if nothing turned up. Only the Python standard library is needed.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -138,21 +139,100 @@ def mdns_browse(seconds: float = 2.0) -> set[str]:
     return found
 
 
-def subnet_hosts(ip: str) -> list[str]:
-    """Every other address on this computer's /24, which is how nearly every home network is set up."""
-    if ip.startswith("127."):
+def prefix_length(ip: str) -> int:
+    """The network size this computer is set up with, from its own settings. Assumes /24 if unsure."""
+    for command in (["ip", "-o", "-4", "addr"], ["ifconfig"]):
+        if not shutil.which(command[0]):
+            continue
+        try:
+            text = subprocess.run(command, capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in text.splitlines():
+            words = line.split()
+            for i, word in enumerate(words):
+                if word.startswith(f"{ip}/"):
+                    return int(word.split("/")[1])
+                if word == ip and "netmask" in words[i:]:
+                    mask = words[words.index("netmask", i) + 1]
+                    number = int(mask, 16) if mask.startswith("0x") else int(ipaddress.ip_address(mask))
+                    return bin(number).count("1")
+    return 24
+
+
+def is_private(ip: str) -> bool:
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return address.version == 4 and address.is_private and not address.is_loopback
+
+
+def range_hosts(network: ipaddress.IPv4Network) -> list[str]:
+    return [str(h) for h in network.hosts()]
+
+
+def own_network(ip: str) -> ipaddress.IPv4Network:
+    # Bigger networks are cut to the 1,022 addresses around this computer, to keep the search quick.
+    return ipaddress.ip_network(f"{ip}/{max(prefix_length(ip), 22)}", strict=False)
+
+
+# Ranges home routers and mesh systems hand out by default, so the deep search reaches
+# lights that a router keeps apart from computers (Eero, Deco, Google, UniFi, ASUS, Fritz!Box...).
+COMMON_RANGES = [
+    "192.168.0", "192.168.1", "192.168.2", "192.168.3", "192.168.4", "192.168.5", "192.168.8", "192.168.10",
+    "192.168.20", "192.168.30", "192.168.50", "192.168.68", "192.168.86", "192.168.88", "192.168.100",
+    "192.168.178", "10.0.0", "10.0.1", "10.0.2", "10.1.1", "10.10.10", "172.16.0",
+]
+
+
+def nearby_networks(ip: str) -> list[ipaddress.IPv4Network]:
+    """Ranges next to this one and the usual router defaults. Lights often sit apart, like 192.168.4.x beside 192.168.1.x."""
+    a, b, _, _ = ip.split(".")
+    ranges = [f"{a}.{b}.{c}" for c in range(16)] + COMMON_RANGES
+    return [ipaddress.ip_network(f"{r}.0/24") for r in dict.fromkeys(ranges)]
+
+
+KNOWN = Path.home() / ".glorby" / "lamps.json"
+
+
+def known_addresses() -> list[str]:
+    try:
+        return [lamp["address"] for lamp in json.loads(KNOWN.read_text())]
+    except (OSError, ValueError, KeyError, TypeError):
         return []
-    network = ipaddress.ip_network(f"{ip}/24", strict=False)
-    return [str(h) for h in network.hosts() if str(h) != ip]
 
 
-def discover() -> dict:
-    """Find the Glorbs on the network. Takes about three seconds."""
+def keep_known(lamps: list[dict]) -> None:
+    """Remember where lamps were, so the next quick search looks there first."""
+    if not lamps:
+        return
+    try:
+        KNOWN.parent.mkdir(exist_ok=True)
+        KNOWN.write_text(json.dumps([{"address": l["address"], "name": l["name"], "mac": l["mac"]} for l in lamps]))
+    except OSError:
+        pass
+
+
+def discover(hints: list[str] = (), deep: bool = False) -> dict:
+    """Find the Glorbs on the network.
+
+    The quick search (about three seconds) asks mDNS and checks this computer's own
+    network plus the ranges of any lamp seen before. The deep search (about twenty
+    seconds) also checks neighbouring ranges and the usual router defaults, which finds
+    lamps a router keeps on a range of their own.
+    """
     ip = local_ip()
-    with ThreadPoolExecutor(max_workers=96) as pool:
+    networks = [] if ip.startswith("127.") else [own_network(ip)]
+    for hint in [*hints, *known_addresses()]:
+        if is_private(hint):
+            networks.append(ipaddress.ip_network(f"{hint}/24", strict=False))
+    if deep and not ip.startswith("127."):
+        networks += nearby_networks(ip)
+    hosts = list(dict.fromkeys(h for n in networks for h in range_hosts(n) if h != ip))
+    with ThreadPoolExecutor(max_workers=256) as pool:
         browsing = pool.submit(mdns_browse)
-        hosts = subnet_hosts(ip)
-        swept = dict(zip(hosts, pool.map(lambda h: fetch_info(h, 1.0), hosts)))
+        swept = dict(zip(hosts, pool.map(lambda h: fetch_info(h, 0.8 if deep else 1.0), hosts)))
         heard = browsing.result()
         for host in heard - set(swept):
             swept[host] = fetch_info(host)
@@ -174,7 +254,8 @@ def discover() -> dict:
             "ver": info.get("ver"),
             "mdns": host in heard,
         })
-    return {"lamps": lamps, "others": others, "network": f"{ip.rsplit('.', 1)[0]}.x"}
+    keep_known(lamps)
+    return {"lamps": lamps, "others": others, "searched": len(hosts), "deep": deep}
 
 
 # ---------------------------------------------------------------- the friendly name
@@ -255,7 +336,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
         if path == "/api/discover":
-            body = json.dumps(discover()).encode()
+            query = urllib.parse.parse_qs(self.path.partition("?")[2])
+            body = json.dumps(discover(query.get("hint", []), "deep" in query)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -285,10 +367,11 @@ def main() -> None:
     parser.add_argument("--name", default="glorby", help="friendly name, reached as <name>.local (default: glorby)")
     parser.add_argument("--no-name", action="store_true", help="don't advertise the friendly name")
     parser.add_argument("--discover", action="store_true", help="just list the lamps found, then exit")
+    parser.add_argument("--deep", action="store_true", help="with --discover, also search the neighbouring ranges")
     args = parser.parse_args()
 
     if args.discover:
-        print(json.dumps(discover(), indent=2))
+        print(json.dumps(discover(deep=args.deep), indent=2))
         return
 
     server, port = serve([args.port] if args.port else [80, 5180])
