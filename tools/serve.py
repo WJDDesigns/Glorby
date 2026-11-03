@@ -340,12 +340,16 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.dumps(discover(query.get("hint", []), "deep" in query)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
         super().do_GET()
+
+    def end_headers(self) -> None:
+        # Always check for a newer copy, so an update shows up on the next reload.
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
 
     def log_message(self, format: str, *args) -> None:
         pass
