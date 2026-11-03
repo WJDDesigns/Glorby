@@ -165,6 +165,9 @@ export class WledLink {
         name: String(current.n || "").startsWith(CLAIM) ? "" : current.n || "",
         others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
         glorb: false,
+        // The lamp's own effect, put back afterward. Glorb firmware's add-on draws its
+        // effect even on a frozen segment, so the segment is switched to plain Solid.
+        fx: String(current.n || "").startsWith(CLAIM) ? null : current.fx ?? null,
       };
     }
     // The firmware's own Glorb add-on draws over the segment, so it rests while frames come
@@ -174,7 +177,7 @@ export class WledLink {
     await this._post({
       on: true,
       lor: 2,
-      seg: [{ id: main, n: this.claimed }, ...this.claim.others.map((id) => ({ id, on: false }))],
+      seg: [{ id: main, n: this.claimed, fx: 0 }, ...this.claim.others.map((id) => ({ id, on: false }))],
       ...(this.claim.glorb ? { GLORB: { enabled: false } } : {}),
     });
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
@@ -194,7 +197,7 @@ export class WledLink {
    */
   _lostClaim(state) {
     const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
-    return !!this.claimed && (main?.n !== this.claimed || state.lor !== 2 || !!state.GLORB?.enabled);
+    return !!this.claimed && (main?.n !== this.claimed || state.lor !== 2 || main?.fx !== 0);
   }
 
   /** Stop if another page or device has taken the lamp since, and claim it again after a restart. */
@@ -224,12 +227,15 @@ export class WledLink {
   /** Give the lamp back its own effect, and live data back to Home Assistant, after effects here stop. */
   _handBack() {
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
-    const claim = this.claim || { name: "", others: [], glorb: false };
+    const claim = this.claim || { name: "", others: [], glorb: false, fx: null };
     this.claim = null;
     this.claimed = null;
     return this._post({
       lor: 0,
-      seg: [{ id: this._mainSegment(), frz: false, n: claim.name }, ...claim.others.map((id) => ({ id, on: true }))],
+      seg: [
+        { id: this._mainSegment(), frz: false, n: claim.name, ...(claim.fx !== null ? { fx: claim.fx } : {}) },
+        ...claim.others.map((id) => ({ id, on: true })),
+      ],
       ...(claim.glorb ? { GLORB: { enabled: true } } : {}),
     }).catch(() => {});
   }
