@@ -50,6 +50,18 @@
     color: oklch(from var(--fill) clamp(.12, (l - .62) * -1000, .97) 0 0); }
   .connect-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
   .connect-actions button { white-space: nowrap; }
+  .finder { display: grid; gap: 10px; }
+  .finder-status, .finder-note { margin: 0; color: var(--secondary-text-color); font-size: 15px; }
+  .finder.searching .finder-status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px;
+    border-radius: 50%; background: var(--primary-color); vertical-align: middle; animation: finder-pulse 1.2s ease-in-out infinite; }
+  @keyframes finder-pulse { 50% { opacity: .25; transform: scale(.7); } }
+  @media (prefers-reduced-motion: reduce) { .finder.searching .finder-status::before { animation: none; } }
+  .finder-list { display: grid; gap: 8px; }
+  .finder-list:empty { display: none; }
+  .connect-choice.found { border: 2px solid var(--primary-color); }
+  .connect-choice.found span { overflow-wrap: anywhere; }
+  .finder-again { justify-self: start; }
+  .connect-or { margin: 16px 0 0; font-size: 14px; font-weight: 600; color: var(--secondary-text-color); }
 </style>
 </head>
 <body>

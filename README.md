@@ -10,8 +10,35 @@ LED's 3D position and streamed to the lamp, and a live 3D model mirrors it.
 - `custom_components/glorb/`: the integration. Effect, palette, speed, color, line-up and orientation are live controls on the device page. Address, frame rate, gamma, microphone and resume are under Configure.
 - `custom_components/glorb/frontend/glorb-ui.js`: the studio, with the 3D model and controls. `glorb-panel.js` shows it in the Home Assistant sidebar.
 - `web/`: the same studio as a web app. It connects to a lamp directly, to Home Assistant, or to a demo lamp. To try it, run `python3 -m http.server 5180` here and open `/web/`, or `/web/?bench` for awkward test data.
+- `tools/serve.py`: the easiest way to run the web app. It serves the app, finds Glorbs on the network for it, and makes it reachable from any phone or computer at http://glorby.local. Only needs Python 3.
 - `tools/`: `play.py` runs effects on the lamp from a terminal, `soak.py` tests frame
   rates, `contact_sheet.py` renders every effect to an image.
+
+## Running the web app
+
+```
+python3 tools/serve.py
+```
+
+Then open http://glorby.local on any device on the same Wi-Fi. The app searches for
+Glorbs as soon as it opens and offers each one it finds with an "Add this lamp" button.
+If a saved lamp gets a new address from the router, the app finds it again by its MAC
+address and reconnects on its own.
+
+- **Port.** It uses port 80 so the address needs no number. If 80 is taken, or Linux
+  won't allow it without root, it uses 5180 and prints `http://glorby.local:5180`.
+  Choose with `--port`, change the name with `--name`, turn it off with `--no-name`.
+- **How it finds lamps.** It asks for WLED's mDNS service (`_wled._tcp`) and checks
+  `/json/info` on every address in this computer's /24, keeping the lamps whose
+  firmware version says GLORB. `python3 tools/serve.py --discover` prints what it finds.
+- **The friendly name.** On a Mac it registers `glorby.local` with the system's own
+  mDNS service (`dns-sd`), on Linux with Avahi when installed, and otherwise answers
+  mDNS itself. Android before 12 and some older Windows setups don't look up `.local`
+  names; the plain IP address it prints always works.
+- **Without the helper.** Served any other way, the app checks addresses itself:
+  ones it has used before, `glorb.local`, then the ranges most home routers use
+  (192.168.1.x, 192.168.0.x, 10.0.0.x and a few more). That takes a few seconds per
+  range. A page on `https://` can't reach the network, so it can't search.
 
 ## Limits worth knowing
 
