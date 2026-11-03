@@ -284,6 +284,28 @@ async function followUpdates() {
   }, 5000);
 }
 
+/** Shown while a lamp is being reached, so a slow or hung lamp never leaves a blank page. */
+function showConnecting(name, onSkip) {
+  const page = document.createElement("div");
+  page.className = "connect";
+  const heading = document.createElement("h1");
+  heading.textContent = "Connect your Glorb";
+  const status = document.createElement("p");
+  status.className = "finder-status";
+  status.setAttribute("aria-live", "polite");
+  status.textContent = `Connecting to ${name}…`;
+  const box = document.createElement("section");
+  box.className = "finder searching";
+  const skip = document.createElement("button");
+  skip.type = "button";
+  skip.className = "finder-again";
+  skip.textContent = "Connect another way";
+  skip.addEventListener("click", onSkip);
+  box.append(status, skip);
+  page.append(heading, box, footer(connectActions()));
+  app.replaceChildren(page);
+}
+
 async function start() {
   followUpdates();
   const params = new URLSearchParams(location.search);
@@ -291,23 +313,30 @@ async function start() {
     openStudio(makeLink({ kind: "bench" }));
     return;
   }
+  const saved = recall();
+  let skipped = false;
+  showConnecting(saved?.name || (saved?.kind === "home-assistant" ? "Home Assistant" : "your Glorb"), () => {
+    skipped = true;
+    showChoices({ hints: saved?.address ? [saved.address] : [] });
+  });
   // Served from the lamp itself, there is nothing to ask.
   const here = new WledLink("");
   try {
     await here.check();
-    openStudio(here);
+    if (!skipped) openStudio(here);
     return;
   } catch {
     // Not on a lamp, so carry on.
   }
-  const saved = recall();
+  if (skipped) return;
   if (saved) {
     const link = makeLink(saved);
     try {
       await link.check();
-      openStudio(link);
+      if (!skipped) openStudio(link);
       return;
     } catch {
+      if (skipped) return;
       // The saved lamp didn't answer. If it only moved address, the search finds it again.
       if (saved.kind === "lamp") {
         showChoices({ hints: [saved.address], reconnect: saved });
@@ -315,7 +344,7 @@ async function start() {
       }
     }
   }
-  showChoices({ hints: saved?.address ? [saved.address] : [] });
+  if (!skipped) showChoices({ hints: saved?.address ? [saved.address] : [] });
 }
 
 start();
