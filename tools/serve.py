@@ -139,8 +139,9 @@ def mdns_browse(seconds: float = 2.0) -> set[str]:
     return found
 
 
-def prefix_length(ip: str) -> int:
-    """The network size this computer is set up with, from its own settings. Assumes /24 if unsure."""
+def interfaces() -> dict[str, int]:
+    """This computer's private IPv4 addresses and their network sizes, from its own settings."""
+    found: dict[str, int] = {}
     for command in (["ip", "-o", "-4", "addr"], ["ifconfig"]):
         if not shutil.which(command[0]):
             continue
@@ -150,14 +151,31 @@ def prefix_length(ip: str) -> int:
             continue
         for line in text.splitlines():
             words = line.split()
-            for i, word in enumerate(words):
-                if word.startswith(f"{ip}/"):
-                    return int(word.split("/")[1])
-                if word == ip and "netmask" in words[i:]:
-                    mask = words[words.index("netmask", i) + 1]
+            if "inet" not in words or words.index("inet") + 1 >= len(words):
+                continue
+            address = words[words.index("inet") + 1]
+            try:
+                if "/" in address:
+                    address, bits = address.split("/")
+                    prefix = int(bits)
+                elif "netmask" in words:
+                    mask = words[words.index("netmask") + 1]
                     number = int(mask, 16) if mask.startswith("0x") else int(ipaddress.ip_address(mask))
-                    return bin(number).count("1")
-    return 24
+                    prefix = bin(number).count("1")
+                else:
+                    prefix = 24
+            except (ValueError, IndexError):
+                continue
+            if is_private(address):
+                found[address] = prefix
+        if found:
+            break
+    return found
+
+
+def prefix_length(ip: str) -> int:
+    """The network size this computer is set up with for ip. Assumes /24 if unsure."""
+    return interfaces().get(ip, 24)
 
 
 def is_private(ip: str) -> bool:
@@ -217,19 +235,24 @@ def keep_known(lamps: list[dict]) -> None:
 def discover(hints: list[str] = (), deep: bool = False) -> dict:
     """Find the Glorbs on the network.
 
-    The quick search (about three seconds) asks mDNS and checks this computer's own
-    network plus the ranges of any lamp seen before. The deep search (about twenty
+    The quick search (about three seconds) asks mDNS and checks every network this
+    computer is on, plus the ranges of any lamp seen before. The deep search (about twenty
     seconds) also checks neighbouring ranges and the usual router defaults, which finds
     lamps a router keeps on a range of their own.
     """
-    ip = local_ip()
-    networks = [] if ip.startswith("127.") else [own_network(ip)]
+    # Every network this computer is on: a Mac can be on Wi-Fi and Ethernet at once.
+    mine = interfaces()
+    primary = local_ip()
+    if is_private(primary):
+        mine.setdefault(primary, 24)
+    networks = [ipaddress.ip_network(f"{ip}/{max(bits, 22)}", strict=False) for ip, bits in mine.items()]
     for hint in [*hints, *known_addresses()]:
         if is_private(hint):
             networks.append(ipaddress.ip_network(f"{hint}/24", strict=False))
-    if deep and not ip.startswith("127."):
-        networks += nearby_networks(ip)
-    hosts = list(dict.fromkeys(h for n in networks for h in range_hosts(n) if h != ip))
+    if deep:
+        for ip in mine:
+            networks += nearby_networks(ip)
+    hosts = list(dict.fromkeys(h for n in networks for h in range_hosts(n) if h not in mine))
     with ThreadPoolExecutor(max_workers=256) as pool:
         browsing = pool.submit(mdns_browse)
         swept = dict(zip(hosts, pool.map(lambda h: fetch_info(h, 0.8 if deep else 1.0), hosts)))
