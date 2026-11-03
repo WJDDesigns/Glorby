@@ -59,9 +59,10 @@ export class WledLink {
 
   async catalog() {
     if (!this.lamp.info.leds) await this.check();
-    const [map, effects, palettes, presets] = await Promise.all([
+    const [map, effects, fxdata, palettes, presets] = await Promise.all([
       lampMap(),
       this._get("/json/effects"),
+      this._get("/json/fxdata").catch(() => []),
       this._get("/json/pal"),
       this._get("/presets.json").catch(() => ({})),
     ]);
@@ -74,6 +75,7 @@ export class WledLink {
     return {
       ...this.local.catalog(),
       wled_effects: effects,
+      wled_fxdata: fxdata,
       wled_palettes: palettes,
       wled_presets: named,
       geometry: { vertices: map.vertices, faces: map.faces },
@@ -351,7 +353,8 @@ export class DemoLink {
     }
     return {
       ...catalog,
-      wled_effects: ["Solid", "Blink", "Breathe", "Wipe", "RSVD", "Rainbow"],
+      // The effect names of a real lamp (firmware 0.14), so the lamp effects tab looks as it will.
+      wled_effects: await fetch(new URL("./demo-lamp-effects.json", import.meta.url)).then((r) => r.json()),
       wled_palettes: ["Default", "Random Cycle", "Party"],
       wled_presets: { 1: "Default", 2: this.awkward ? "A preset with a long name that needs to wrap" : "Night" },
       geometry: { vertices: map.vertices, faces: map.faces },
