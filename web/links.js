@@ -164,13 +164,18 @@ export class WledLink {
       this.claim = {
         name: String(current.n || "").startsWith(CLAIM) ? "" : current.n || "",
         others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
+        glorb: false,
       };
     }
+    // The firmware's own Glorb add-on draws over the segment, so it rests while frames come
+    // from here and comes back on afterward. Another page may have rested it already.
+    if (this.lamp.state.GLORB) this.claim.glorb = true;
     this.claimed = `${CLAIM}${this.token}`;
     await this._post({
       on: true,
       lor: 2,
       seg: [{ id: main, n: this.claimed }, ...this.claim.others.map((id) => ({ id, on: false }))],
+      ...(this.claim.glorb ? { GLORB: { enabled: false } } : {}),
     });
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
     this.checkedAt = performance.now();
@@ -183,11 +188,22 @@ export class WledLink {
     return !!this.claimed && name.startsWith(CLAIM) && name !== this.claimed;
   }
 
-  /** Stop if another page or device has taken the lamp since. */
+  /**
+   * True when the lamp has forgotten this page's claim without anyone else taking it.
+   * A restart does that, and then Home Assistant may resume streaming over the top.
+   */
+  _lostClaim(state) {
+    const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
+    return !!this.claimed && (main?.n !== this.claimed || state.lor !== 2 || !!state.GLORB?.enabled);
+  }
+
+  /** Stop if another page or device has taken the lamp since, and claim it again after a restart. */
   async _checkClaim() {
     if (!this.local.running || !this.claimed) return;
     try {
-      if (this._takenBy(await this._get("/json/state"))) this._yield();
+      const state = await this._get("/json/state");
+      if (this._takenBy(state)) this._yield();
+      else if (this._lostClaim(state)) this._claim();
     } catch {
       // The lamp being briefly unreachable isn't a takeover.
     }
@@ -208,12 +224,13 @@ export class WledLink {
   /** Give the lamp back its own effect, and live data back to Home Assistant, after effects here stop. */
   _handBack() {
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
-    const claim = this.claim || { name: "", others: [] };
+    const claim = this.claim || { name: "", others: [], glorb: false };
     this.claim = null;
     this.claimed = null;
     return this._post({
       lor: 0,
       seg: [{ id: this._mainSegment(), frz: false, n: claim.name }, ...claim.others.map((id) => ({ id, on: true }))],
+      ...(claim.glorb ? { GLORB: { enabled: true } } : {}),
     }).catch(() => {});
   }
 
@@ -224,7 +241,11 @@ export class WledLink {
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     // The lamp's own live view is only needed while it plays its own effects.
-    socket.onopen = () => socket.send(JSON.stringify({ lv: !this.local.running }));
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ lv: !this.local.running }));
+      // The lamp may have restarted while away, which forgets the claim.
+      if (this.local.running && this.claimed) this._claim().catch(() => {});
+    };
     socket.onmessage = (event) => {
       this.heard = Date.now();
       if (typeof event.data === "string") {
