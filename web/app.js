@@ -222,6 +222,8 @@ function finder({ hints, reconnect }) {
     again.hidden = false;
     if (result.blocked) {
       status.textContent = "This secure page can't search your network. Run Glorby's helper and open http://glorby.local, or connect another way below.";
+    } else if (!result.lamps.length && result.warning) {
+      status.textContent = result.warning;
     } else if (!result.lamps.length) {
       const extra = result.others ? ` It found ${result.others === 1 ? "a WLED light" : `${result.others} WLED lights`} that ${result.others === 1 ? "isn't a Glorb" : "aren't Glorbs"}.` : "";
       status.textContent = `No Glorb turned up.${extra} Check it's switched on and on the same Wi-Fi as this device, then search again, or enter its address below.`;

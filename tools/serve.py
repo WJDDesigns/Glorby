@@ -10,6 +10,7 @@ the local network for a lamp, then the ranges next to it if nothing turned up. O
 from __future__ import annotations
 
 import argparse
+import errno
 import functools
 import ipaddress
 import json
@@ -179,6 +180,37 @@ def prefix_length(ip: str) -> int:
     return interfaces().get(ip, 24)
 
 
+def gateway() -> str | None:
+    """The router's address, from this computer's routing table."""
+    for command, marker in ((["route", "-n", "get", "default"], "gateway:"), (["ip", "route", "show", "default"], "via")):
+        if not shutil.which(command[0]):
+            continue
+        try:
+            words = subprocess.run(command, capture_output=True, text=True, timeout=3).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if marker in words and words.index(marker) + 1 < len(words):
+            return words[words.index(marker) + 1]
+    return None
+
+
+def network_blocked() -> bool:
+    """True when macOS's Local Network privacy setting keeps this program off the network.
+
+    A blocked program gets "no route to host" even from the router, which always
+    answers (or refuses) on a working network.
+    """
+    if platform.system() != "Darwin":
+        return False
+    router = gateway()
+    if not router:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.5)
+        code = s.connect_ex((router, 80))
+    return code in (errno.EHOSTUNREACH, errno.EPERM, errno.EACCES)
+
+
 def is_private(ip: str) -> bool:
     try:
         address = ipaddress.ip_address(ip)
@@ -279,7 +311,13 @@ def discover(hints: list[str] = (), deep: bool = False) -> dict:
             "mdns": host in heard,
         })
     keep_known(lamps)
-    return {"lamps": lamps, "others": others, "searched": len(hosts), "deep": deep}
+    result = {"lamps": lamps, "others": others, "searched": len(hosts), "deep": deep}
+    if not lamps and not others and network_blocked():
+        result["blocked"] = (
+            "macOS is keeping Glorby's helper off your network. Open System Settings, "
+            "Privacy & Security, Local Network, and turn on Python. Then search again."
+        )
+    return result
 
 
 # ---------------------------------------------------------------- the friendly name

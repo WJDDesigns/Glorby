@@ -86,7 +86,16 @@ export async function findLamps({ hints = [], onLamp = () => {}, onProgress = ()
       helper = (await askHelper(hintHosts, true, signal)) || helper;
       helper.lamps.forEach(report);
     }
-    return { lamps: [...found.values()], via: "helper", others: helper.others || 0 };
+    if (!found.size && !signal?.aborted) {
+      // The helper can be kept off the network (macOS Local Network privacy) while this page isn't,
+      // so check the addresses this page already knows itself.
+      onProgress("Checking lamps you've used before");
+      await Promise.all(hintHosts.filter((h) => prefix(h)).map(async (host) => {
+        const info = await getJson(`http://${host}/json/info`, PROBE_MS, signal);
+        if (isGlorb(info)) report({ address: info.ip || host, name: info.name || "Glorb", mac: info.mac, ver: info.ver });
+      }));
+    }
+    return { lamps: [...found.values()], via: "helper", others: helper.others || 0, warning: helper.blocked };
   }
 
   if (location.protocol === "https:") return { lamps: [], via: "none", blocked: true };
