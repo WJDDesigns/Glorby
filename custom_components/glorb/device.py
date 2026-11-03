@@ -84,6 +84,7 @@ class GlorbDevice:
         self.wled_state: dict[str, Any] = {}
         self.wled_info: dict[str, Any] = {}
         self.wled_effects: list[str] = []
+        self.wled_fxdata: list[str] = []
         self.wled_palettes: list[str] = []
         self.wled_presets: dict[str, str] = {}
         self.available = False
@@ -168,6 +169,11 @@ class GlorbDevice:
             self.wled_info = await self._get("json/info")
             self.wled_state = await self._get("json/state")
             self.wled_effects = await self._get("json/effects")
+            try:
+                # Says which effects react to sound or are drawn in 2D, for grouping them.
+                self.wled_fxdata = await self._get("json/fxdata")
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                self.wled_fxdata = []
             self.wled_palettes = await self._get("json/palettes")
             presets = await self._get("presets.json")
             self.wled_presets = {k: v["n"] for k, v in presets.items() if isinstance(v, dict) and v.get("n")}

@@ -56,6 +56,7 @@ def ws_catalog(hass, connection, msg) -> None:
             "patterns": list(OVERLAY_PATTERNS),
             "sweep_directions": list(SWEEP_DIRECTIONS),
             "wled_effects": device.wled_effects,
+            "wled_fxdata": device.wled_fxdata,
             "wled_palettes": device.wled_palettes,
             "wled_presets": device.wled_presets,
             "geometry": device.geometry(),

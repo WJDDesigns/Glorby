@@ -189,6 +189,37 @@ class Sphere {
   }
 }
 
+// The lamp's own effects, sorted into groups a person can browse. The firmware's
+// effect data says which react to sound and which are drawn in 2D. Names do the rest.
+const WLED_GROUPS = [
+  ["Music", /\b(geq|freq|grav|noisemeter|puddle|waterfall|rocktaves|dj light|funky plank|blurz|matripix|pixelwave|juggles|midnoise|noisemove|noisefire|ripple peak|akemi|waverly|plasmoid|pixels|gravimeter)/],
+  ["Fire and nature", /fire(?!works)|candle|lightning|rain\b|lake|pacifica|aurora|drip|sunrise|polar|sun radiation|ocean|flow|soap|lava|plasma ball/],
+  ["Sparkle", /sparkle|twinkle|glitter|dissolve|fairy|starburst|firework|popcorn|spots|sindots|stars?\b|ripple|bouncing|metaballs|blobs|frizzles/],
+  ["Chase and scan", /chase|running|runner|scan|wipe|sweep|comet|meteor|rolling|sinelon|railway|two dots|stream|android|theater|lighthouse|oscillate|juggle|saw|tetrix|icu|phased/],
+  ["Color", /rainbow|colorloop|colorwaves|colorful|pride|plasma|noise|random colors|dynamic|palette|gradient|bpm|blends|sine|tri fade|percent|loading/],
+  ["Shapes", /black hole|dna|julia|lissajous|matrix|octopus|swirl|tartan|hiphotic|game of life|drift|waving|wavesins|distortion|bursts|scrolling|washing|shadows|bees|ghost|spaceships|pulser|perlin|chunchun|heartbeat/],
+  ["Basics", /solid|blink|breathe|fade|strobe|traffic|tv simulator/],
+];
+
+/** Group the lamp's effects. Returns [group, [[name, index], ...]] in a steady order. */
+function groupWledEffects(names, fxdata = []) {
+  const groups = new Map([...WLED_GROUPS.map(([group]) => [group, []]), ["2D", []], ["Other", []]]);
+  names.forEach((name, index) => {
+    if (!name || name === "RSVD" || name === "-") return;
+    const flags = String(fxdata[index] || "").split(";")[3] || "";
+    const lower = name.toLowerCase();
+    let group;
+    if (/[vf]/.test(flags)) group = "Music";
+    else group = WLED_GROUPS.find(([, pattern]) => pattern.test(lower))?.[0];
+    if (!group && flags.includes("2") && !flags.includes("1")) group = "2D";
+    groups.get(group || "Other").push([name, index]);
+  });
+  const order = ["Basics", "Color", "Chase and scan", "Sparkle", "Fire and nature", "Shapes", "Music", "2D", "Other"];
+  return order
+    .filter((group) => groups.get(group).length)
+    .map((group) => [group, groups.get(group).sort((a, b) => a[0].localeCompare(b[0]))]);
+}
+
 const ALL_TABS = [["effects", "Effects"], ["tune", "Tune"], ["lamp", "Lamp effects"], ["looks", "Looks"], ["alerts", "Alerts"]];
 
 const STYLE = `
@@ -245,6 +276,7 @@ export class GlorbStudio extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this.category = "Worlds";
     this.wledFilter = "";
+    this.wledGroup = "Basics";
     this.alertForm = { pattern: "pulse", color: "#ff0000", color2: "#000000", duration: 4, direction: "Up and down", speed: 1, width: 0.5 };
     this._timers = {};
   }
@@ -571,22 +603,51 @@ export class GlorbStudio extends HTMLElement {
       body.append(fields);
     }
 
+    const groups = groupWledEffects(this.catalog.wled_effects, this.catalog.wled_fxdata);
+    // Open on the group holding what's playing, so the lit button is in view.
+    if (this._wledShown !== s.wled.fx) {
+      this._wledShown = s.wled.fx;
+      const playing = groups.find(([, list]) => list.some(([, i]) => i === s.wled.fx));
+      if (playing && !s.running) this.wledGroup = playing[0];
+    }
+    if (!groups.some(([group]) => group === this.wledGroup)) this.wledGroup = groups[0]?.[0];
     const search = document.createElement("input");
     search.type = "search";
-    search.placeholder = "Search effects";
+    search.placeholder = "Search all lamp effects";
     search.value = this.wledFilter;
-    const grid = this._el(`<div class="grid"></div>`);
+    const chips = this._el(`<div class="tabs"></div>`);
+    const list = document.createElement("div");
+    list.className = "panel";
+    const effectButton = ([name, i]) => this._button(name, () => this._call("glorb/wled", { fx: i }), !s.running && s.wled.fx === i);
     const fill = () => {
-      grid.innerHTML = "";
-      const q = this.wledFilter.toLowerCase();
-      this.catalog.wled_effects.forEach((name, i) => {
-        if (name === "RSVD" || (q && !name.toLowerCase().includes(q))) return;
-        grid.append(this._button(name, () => this._call("glorb/wled", { fx: i }), !s.running && s.wled.fx === i));
+      chips.replaceChildren();
+      list.replaceChildren();
+      const q = this.wledFilter.trim().toLowerCase();
+      if (q) {
+        // A search looks through every group, and says which group each match is in.
+        groups.forEach(([group, effects]) => {
+          const found = effects.filter(([name]) => name.toLowerCase().includes(q));
+          if (!found.length) return;
+          const grid = this._el(`<div class="grid"></div>`);
+          found.forEach((fx) => grid.append(effectButton(fx)));
+          const head = document.createElement("h3");
+          head.textContent = group;
+          list.append(head, grid);
+        });
+        if (!list.childElementCount) list.textContent = "No lamp effect has that in its name.";
+        return;
+      }
+      groups.forEach(([group, effects]) => {
+        chips.append(this._button(`${group} ${effects.length}`, () => { this.wledGroup = group; fill(); }, group === this.wledGroup));
       });
+      const grid = this._el(`<div class="grid"></div>`);
+      (groups.find(([group]) => group === this.wledGroup)?.[1] || []).forEach((fx) => grid.append(effectButton(fx)));
+      list.append(grid);
     };
     search.addEventListener("input", () => { this.wledFilter = search.value; fill(); });
     fill();
-    body.append(search, grid);
+    const head = this._el(`<h3>Lamp effects</h3>`);
+    body.append(head, search, chips, list);
   }
 
   _tabLooks(body) {
