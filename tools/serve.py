@@ -551,6 +551,8 @@ def main() -> None:
     parser.add_argument("--install", action="store_true", help="start the helper with this computer and keep it running")
     parser.add_argument("--no-update", action="store_true", help="don't pull new versions from GitHub every minute")
     args = parser.parse_args()
+    # Under launchd or systemd the log is a file, so write each line out as it happens.
+    sys.stdout.reconfigure(line_buffering=True)
 
     if args.install:
         install()
