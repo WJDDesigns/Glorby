@@ -13,6 +13,8 @@ const LAMP_BACKLOG = 4096;
 // so two pages never paint the lamp at once.
 const CLAIM = "Glorby ";
 const CLAIM_CHECK_MS = 2500;
+// The Glorb firmware's own add-on, in the lamp's settings.
+const ADDON = "GLORB";
 
 async function lampMap() {
   const response = await fetch(new URL("./lamp-map.json", import.meta.url));
@@ -40,6 +42,8 @@ export class WledLink {
       onRelease: () => this._handBack(),
     });
     this.token = Math.random().toString(36).slice(2, 8);
+    // Closing the page while effects play gives the lamp back, add-on included.
+    addEventListener("pagehide", () => this.local.release());
     // Other tabs in this browser hear about a takeover at once, without waiting on the lamp.
     this.channel = typeof BroadcastChannel === "function" ? new BroadcastChannel(`glorby:${this.base}`) : null;
     if (this.channel) {
@@ -161,27 +165,55 @@ export class WledLink {
     const segments = this.lamp.state.seg || [];
     if (!this.claim) {
       const current = segments.find((seg) => seg.id === main) || {};
+      const takenOver = String(current.n || "").startsWith(CLAIM);
       this.claim = {
-        name: String(current.n || "").startsWith(CLAIM) ? "" : current.n || "",
+        name: takenOver ? "" : current.n || "",
         others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
-        glorb: false,
         // The lamp's own effect, put back afterward. Glorb firmware's add-on draws its
         // effect even on a frozen segment, so the segment is switched to plain Solid.
-        fx: String(current.n || "").startsWith(CLAIM) ? null : current.fx ?? null,
+        fx: takenOver ? null : current.fx ?? null,
+        addons: null,
       };
+      // The firmware's own Glorb add-on flashes its own lights over the frames once a second.
+      // Only its saved settings turn it off, so it rests there while frames come from here.
+      // A page that took over from another Glorby page finds it resting already, and puts it
+      // back on when done.
+      this.claim.addons = await this._restAddon(takenOver).catch(() => null);
     }
-    // The firmware's own Glorb add-on draws over the segment, so it rests while frames come
-    // from here and comes back on afterward. Another page may have rested it already.
-    if (this.lamp.state.GLORB) this.claim.glorb = true;
     this.claimed = `${CLAIM}${this.token}`;
     await this._post({
       on: true,
       lor: 2,
       seg: [{ id: main, n: this.claimed, fx: 0 }, ...this.claim.others.map((id) => ({ id, on: false }))],
-      ...(this.claim.glorb ? { GLORB: { enabled: false } } : {}),
     });
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
     this.checkedAt = performance.now();
+  }
+
+  /**
+   * Turn off the firmware's Glorb add-on in the lamp's settings. Returns every add-on's
+   * on/off setting to restore afterward, or null when there's nothing to put back.
+   * Each write names every add-on, because one that's left out can come back on.
+   */
+  async _restAddon(wasOurs) {
+    const cfg = await this._get("/json/cfg");
+    const um = cfg.um || {};
+    if (!um[ADDON]) return null;
+    const addons = Object.fromEntries(Object.entries(um).map(([name, value]) => [name, !!value?.enabled]));
+    if (wasOurs) addons[ADDON] = true;
+    if (!addons[ADDON]) return null;
+    await this._settings({ ...addons, [ADDON]: false });
+    return addons;
+  }
+
+  _settings(addons) {
+    const um = Object.fromEntries(Object.entries(addons).map(([name, enabled]) => [name, { enabled }]));
+    return fetch(`${this.base}/json/cfg`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ um }),
+      keepalive: true,
+    });
   }
 
   /** True when the lamp's state shows another Glorby page has claimed it. */
@@ -227,16 +259,16 @@ export class WledLink {
   /** Give the lamp back its own effect, and live data back to Home Assistant, after effects here stop. */
   _handBack() {
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
-    const claim = this.claim || { name: "", others: [], glorb: false, fx: null };
+    const claim = this.claim || { name: "", others: [], fx: null, addons: null };
     this.claim = null;
     this.claimed = null;
+    if (claim.addons) this._settings(claim.addons).catch(() => {});
     return this._post({
       lor: 0,
       seg: [
         { id: this._mainSegment(), frz: false, n: claim.name, ...(claim.fx !== null ? { fx: claim.fx } : {}) },
         ...claim.others.map((id) => ({ id, on: true })),
       ],
-      ...(claim.glorb ? { GLORB: { enabled: true } } : {}),
     }).catch(() => {});
   }
 
@@ -311,6 +343,8 @@ export class WledLink {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // Lets the hand-back finish when the page is closing.
+      keepalive: true,
     });
   }
 
