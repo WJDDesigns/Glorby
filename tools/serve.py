@@ -13,6 +13,7 @@ import argparse
 import functools
 import ipaddress
 import json
+import os
 import platform
 import shutil
 import socket
@@ -350,6 +351,110 @@ def advertise(name: str, port: int, ip: str):
 # ---------------------------------------------------------------- the web server
 
 
+# ---------------------------------------------------------------- staying up to date
+
+UPDATE_EVERY = 60
+WATCHED = [ROOT / "web", ROOT / "custom_components" / "glorb" / "frontend"]
+restart = threading.Event()
+
+
+def git(*args: str) -> str:
+    result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"git {args[0]} failed")
+    return result.stdout.strip()
+
+
+def version() -> str:
+    """Changes whenever the app's files do, from a pull or a local edit. Open pages reload when it changes."""
+    newest = max((f.stat().st_mtime for folder in WATCHED for f in folder.rglob("*") if f.is_file()), default=0)
+    try:
+        head = git("rev-parse", "--short", "HEAD")
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        head = "local"
+    return f"{head}-{int(newest)}"
+
+
+def update_once() -> str | None:
+    """Fast-forward to the newest commit on this branch. Returns what changed, or None."""
+    if git("status", "--porcelain", "--untracked-files=no"):
+        return None  # Someone is editing here, so leave their work alone.
+    git("fetch", "--quiet")
+    before = git("rev-parse", "HEAD")
+    try:
+        upstream = git("rev-parse", "@{u}")
+    except RuntimeError:
+        return None  # The branch doesn't track one on GitHub.
+    if upstream == before or git("merge-base", before, upstream) != before:
+        return None
+    git("merge", "--ff-only", "--quiet", upstream)
+    return git("diff", "--name-only", before, upstream)
+
+
+def keep_updated(server: ThreadingHTTPServer) -> None:
+    """Pull new versions in the background. Pages reload themselves; the helper restarts itself if it changed."""
+    while True:
+        time.sleep(UPDATE_EVERY)
+        try:
+            changed = update_once()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as err:
+            print(f"Couldn't check for updates: {err}")
+            continue
+        if not changed:
+            continue
+        print(f"Updated to {git('log', '-1', '--format=%h %s')}")
+        if "tools/serve.py" in changed.splitlines():
+            print("The helper itself changed, so it's restarting.")
+            restart.set()
+            server.shutdown()
+            return
+
+
+def install() -> None:
+    """Start the helper whenever this computer starts, and keep it running."""
+    command = [sys.executable, str(Path(__file__).resolve())]
+    if platform.system() == "Darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / "me.glorb.glorby.plist"
+        arguments = "".join(f"<string>{part}</string>" for part in command)
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>me.glorb.glorby</string>
+<key>ProgramArguments</key><array>{arguments}</array>
+<key>WorkingDirectory</key><string>{ROOT}</string>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>{Path.home() / ".glorby" / "glorby.log"}</string>
+<key>StandardErrorPath</key><string>{Path.home() / ".glorby" / "glorby.log"}</string>
+</dict></plist>
+""")
+        (Path.home() / ".glorby").mkdir(exist_ok=True)
+        subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
+        subprocess.run(["launchctl", "load", "-w", str(plist)], check=True)
+        print(f"Glorby now starts with this Mac. Log: ~/.glorby/glorby.log. Undo with: launchctl unload -w {plist}")
+    elif shutil.which("systemctl"):
+        unit = Path.home() / ".config" / "systemd" / "user" / "glorby.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(f"""[Unit]
+Description=Glorby web app
+After=network-online.target
+
+[Service]
+WorkingDirectory={ROOT}
+ExecStart={" ".join(command)}
+Restart=always
+
+[Install]
+WantedBy=default.target
+""")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", "glorby"], check=True)
+        print("Glorby now starts with this computer. Logs: journalctl --user -u glorby. Undo with: systemctl --user disable --now glorby")
+    else:
+        sys.exit("Starting with the computer is set up for macOS and Linux. Run python3 tools/serve.py yourself here.")
+
+
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -357,6 +462,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/web/")
             self.end_headers()
+            return
+        if path == "/api/version":
+            body = json.dumps({"version": version()}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path == "/api/discover":
             query = urllib.parse.parse_qs(self.path.partition("?")[2])
@@ -395,7 +508,13 @@ def main() -> None:
     parser.add_argument("--no-name", action="store_true", help="don't advertise the friendly name")
     parser.add_argument("--discover", action="store_true", help="just list the lamps found, then exit")
     parser.add_argument("--deep", action="store_true", help="with --discover, also search the neighbouring ranges")
+    parser.add_argument("--install", action="store_true", help="start the helper with this computer and keep it running")
+    parser.add_argument("--no-update", action="store_true", help="don't pull new versions from GitHub every minute")
     args = parser.parse_args()
+
+    if args.install:
+        install()
+        return
 
     if args.discover:
         print(json.dumps(discover(deep=args.deep), indent=2))
@@ -414,14 +533,20 @@ def main() -> None:
     if advertiser:
         print(f"  http://{args.name}.local{suffix}")
     print(f"  http://{ip}{suffix}")
+    if not args.no_update and (ROOT / ".git").exists():
+        threading.Thread(target=keep_updated, args=(server,), daemon=True).start()
+        print("New versions on GitHub are picked up within a minute, and open pages reload by themselves.")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        server.server_close()
         if isinstance(advertiser, subprocess.Popen):
             advertiser.terminate()
+    if restart.is_set():
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 if __name__ == "__main__":

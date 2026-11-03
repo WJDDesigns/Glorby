@@ -20,11 +20,17 @@ LED's 3D position and streamed to the lamp, and a live 3D model mirrors it.
 python3 tools/serve.py
 ```
 
+To have it start with the computer and stay running, run it once with `--install`
+(macOS LaunchAgent or a Linux systemd user service).
+
 Then open http://glorby.local on any device on the same Wi-Fi. The app searches for
 Glorbs as soon as it opens and offers each one it finds with an "Add this lamp" button.
 If a saved lamp gets a new address from the router, the app finds it again by its MAC
 address and reconnects on its own.
 
+- **Updates.** Every minute the helper pulls new commits for the branch it's on (only
+  when nothing is edited locally). Open pages reload themselves when the app changes,
+  and the helper restarts itself when `tools/serve.py` changes. `--no-update` turns this off.
 - **Port.** It uses port 80 so the address needs no number. If 80 is taken, or Linux
   won't allow it without root, it uses 5180 and prints `http://glorby.local:5180`.
   Choose with `--port`, change the name with `--name`, turn it off with `--no-name`.

@@ -245,7 +245,30 @@ function showChoices({ hints = [], reconnect = null } = {}) {
   app.replaceChildren(page);
 }
 
+/** When Glorby's helper serves the page, reload as soon as a new version of the app lands. */
+async function followUpdates() {
+  const current = async () => {
+    const response = await fetch("/api/version", { cache: "no-store" });
+    if (!response.ok) throw new Error("no helper");
+    return (await response.json()).version;
+  };
+  let seen;
+  try {
+    seen = await current();
+  } catch {
+    return; // Served some other way, so there's nothing to follow.
+  }
+  setInterval(async () => {
+    try {
+      if ((await current()) !== seen) location.reload();
+    } catch {
+      // The helper is restarting or the network blinked. Try again next time.
+    }
+  }, 5000);
+}
+
 async function start() {
+  followUpdates();
   const params = new URLSearchParams(location.search);
   if (params.has("bench")) {
     openStudio(makeLink({ kind: "bench" }));
