@@ -200,13 +200,42 @@ export class WledLink {
     const um = cfg.um || {};
     if (!um[ADDON]) return null;
     const addons = Object.fromEntries(Object.entries(um).map(([name, value]) => [name, !!value?.enabled]));
-    if (wasOurs) addons[ADDON] = true;
+    // This browser rested it before and never got to put it back, say because the lamp hung.
+    if (wasOurs || this._rested()) addons[ADDON] = true;
     if (!addons[ADDON]) return null;
+    this._rested(addons);
     await this._settings({ ...addons, [ADDON]: false });
     return addons;
   }
 
+  /**
+   * The add-on settings this browser owes the lamp, kept so a page that dies or a lamp that
+   * hangs mid-effect can't leave the add-on off for good. Pass a value to store it, or null to clear.
+   */
+  _rested(addons) {
+    const key = `glorby.rested.${this.base}`;
+    try {
+      if (addons === undefined) return JSON.parse(localStorage.getItem(key));
+      if (addons) localStorage.setItem(key, JSON.stringify(addons));
+      else localStorage.removeItem(key);
+    } catch {
+      // Without storage, the page puts the add-on back only when it stops normally.
+    }
+    return null;
+  }
+
+  /** Put back an add-on this browser left resting, once no page is playing on the lamp. */
+  _restoreOwed(state) {
+    if (this.owedChecked || this.local.running) return;
+    this.owedChecked = true;
+    const owed = this._rested();
+    const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
+    if (!owed || String(main?.n || "").startsWith(CLAIM)) return;
+    this._settings(owed).catch(() => {});
+  }
+
   _settings(addons) {
+    if (addons[ADDON]) this._rested(null);
     const um = Object.fromEntries(Object.entries(addons).map(([name, enabled]) => [name, { enabled }]));
     return fetch(`${this.base}/json/cfg`, {
       method: "POST",
@@ -280,6 +309,7 @@ export class WledLink {
     this.socket = socket;
     // The lamp's own live view is only needed while it plays its own effects.
     socket.onopen = () => {
+      this.owedChecked = false;
       socket.send(JSON.stringify({ lv: !this.local.running }));
       // The lamp may have restarted while away, which forgets the claim.
       if (this.local.running && this.claimed) this._claim().catch(() => {});
@@ -290,6 +320,7 @@ export class WledLink {
         const data = JSON.parse(event.data);
         if (data.state) {
           this.lamp.state = data.state;
+          this._restoreOwed(data.state);
           if (this._takenBy(data.state)) this._yield();
         }
         if (data.info) this.lamp.info = data.info;
