@@ -8,7 +8,8 @@ LED's 3D position and streamed to the lamp, and a live 3D model mirrors it.
 - `custom_components/glorb/core/`: geometry, effects and engine. No Home Assistant
   imports, so it runs and tests on its own.
 - `custom_components/glorb/`: the integration. Effect, palette, speed, color, line-up and orientation are live controls on the device page. Address, frame rate, gamma, microphone and resume are under Configure.
-- `custom_components/glorb/frontend/glorb-panel.js`: the sidebar page with the 3D model and effects.
+- `custom_components/glorb/frontend/glorb-ui.js`: the studio, with the 3D model and controls. `glorb-panel.js` shows it in the Home Assistant sidebar.
+- `web/`: the same studio as a web app. It connects to a lamp directly, to Home Assistant, or to a demo lamp. To try it, run `python3 -m http.server 5180` here and open `/web/`, or `/web/?bench` for awkward test data.
 - `tools/`: `play.py` runs effects on the lamp from a terminal, `soak.py` tests frame
   rates, `contact_sheet.py` renders every effect to an image.
 
