@@ -25,6 +25,13 @@ its Bluetooth app control and HomeKit are not, since their source isn't public.
 
 Needs git and Python. The image lands in `firmware/build/glorby-wled.bin`.
 
+## After installing
+
+- WLED 16 only treats the lamp as its 20x6 grid when `ledmap.json` says so. Add
+  `"width":20,"height":6` next to `"map"` in `/ledmap.json` (edit it at `/edit`), then restart.
+- GLORB's own effects (ids 187 and up) don't exist in WLED. Presets that used one play a
+  different effect, so point them at a WLED effect, for example Colorwaves (67).
+
 ## Install and go back
 
 Upload `glorby-wled.bin` at `http://<lamp>/update`. To return to GLORB's firmware, upload
