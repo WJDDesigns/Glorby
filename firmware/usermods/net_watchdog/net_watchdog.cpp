@@ -49,6 +49,8 @@ class NetWatchdog : public Usermod {
   }
 
  public:
+  void setup() override {}
+
   void connected() override {
     misses = 0;  // stay armed: once the gateway has answered since boot, silence counts
   }
