@@ -13,9 +13,17 @@ const AT_ONCE = 96;
 const COMMON = ["192.168.1", "192.168.0", "10.0.0", "192.168.86", "192.168.68", "10.0.1", "192.168.2", "192.168.50"];
 const NAMES = ["glorb.local", "wled.local"];
 
+/**
+ * True for a Glorb, on any firmware: the vendor's (its version says GLORB), Glorby's own
+ * build (it reports a network watchdog, netwd, and a GLORB release name), or plain WLED
+ * set up like a Glorb (80 faces, or the stock 20 x 6 matrix of 120). The same test as
+ * tools/serve.py and the Home Assistant integration.
+ */
 export function isGlorb(info) {
-  // The same test the Home Assistant integration uses.
-  return /GLORB/i.test(String(info?.ver ?? ""));
+  if (!info?.leds) return false;
+  if (/GLORB/i.test(`${info.ver ?? ""} ${info.release ?? ""}`) || info.netwd !== undefined) return true;
+  const { count, matrix } = info.leds;
+  return count === 80 || (count === 120 && matrix?.w === 20 && matrix?.h === 6);
 }
 
 function prefix(host) {

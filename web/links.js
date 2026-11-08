@@ -225,13 +225,25 @@ export class WledLink {
   }
 
   /** Put back an add-on this browser left resting, once no page is playing on the lamp. */
-  _restoreOwed(state) {
+  async _restoreOwed(state) {
     if (this.owedChecked || this.local.running) return;
     this.owedChecked = true;
     const owed = this._rested();
     const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
     if (!owed || String(main?.n || "").startsWith(CLAIM)) return;
-    this._settings(owed).catch(() => {});
+    try {
+      // Firmware without the add-on (Glorby's own build, plain WLED) has nothing to put back,
+      // and only add-ons this firmware still has are written.
+      const um = (await this._get("/json/cfg")).um || {};
+      if (!um[ADDON]) {
+        this._rested(null);
+        return;
+      }
+      const still = Object.fromEntries(Object.entries(owed).filter(([name]) => name in um));
+      await this._settings(still);
+    } catch {
+      // The lamp didn't answer. The record stays, so the next visit tries again.
+    }
   }
 
   _settings(addons) {

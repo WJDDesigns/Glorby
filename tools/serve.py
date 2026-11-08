@@ -123,8 +123,14 @@ def fetch_info(host: str, timeout: float = 1.5) -> dict | None:
 
 
 def is_glorb(info: dict) -> bool:
-    # The same test the Home Assistant integration uses.
-    return "GLORB" in str(info.get("ver", "")).upper()
+    """A Glorb on any firmware: the vendor's (version says GLORB), Glorby's own build (reports
+    a network watchdog and a GLORB release name), or plain WLED set up like a Glorb (80 faces,
+    or the stock 20 x 6 matrix of 120). The same test as web/discover.js and the integration."""
+    if f"{info.get('ver', '')} {info.get('release', '')}".upper().find("GLORB") >= 0 or "netwd" in info:
+        return True
+    leds = info.get("leds") or {}
+    matrix = leds.get("matrix") or {}
+    return leds.get("count") == 80 or (leds.get("count") == 120 and matrix.get("w") == 20 and matrix.get("h") == 6)
 
 
 def mdns_browse(seconds: float = 2.0) -> set[str]:
