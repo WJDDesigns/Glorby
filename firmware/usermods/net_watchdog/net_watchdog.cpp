@@ -7,9 +7,9 @@
 
 class NetWatchdog : public Usermod {
   bool enabled = true;
-  uint16_t intervalS = 15;     // seconds between pings
-  uint8_t missLimit = 4;       // consecutive misses before acting (~1 min)
-  uint16_t restartAfterS = 120; // restart if still unreachable this long after a forced reconnect
+  uint16_t intervalS = 5;      // seconds between pings
+  uint8_t missLimit = 3;       // consecutive misses before acting (~15-20 s)
+  uint16_t restartAfterS = 60;  // restart if still unreachable this long after a forced reconnect
 
   esp_ping_handle_t ping = nullptr;
   volatile bool replied = false;
