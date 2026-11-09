@@ -229,6 +229,9 @@ function finder({ hints, reconnect }) {
       status.textContent = `No Glorb turned up.${extra} Check it's switched on and on the same Wi-Fi as this device, then search again, or enter its address below.`;
     } else {
       status.textContent = count === 1 ? "Found a Glorb. Tap it to add it." : `Found ${count} Glorbs. Tap one to add it.`;
+      if (result.helperBlind) {
+        status.textContent += " Glorby's helper couldn't see it, so new lamps won't be found automatically. On a Mac, turn on Python in System Settings › Privacy & Security › Local Network.";
+      }
     }
   };
   again.addEventListener("click", run);

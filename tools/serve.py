@@ -476,9 +476,7 @@ def check_for_update(server: ThreadingHTTPServer | None = None) -> dict:
         status["message"] = f"Updated to {summary}"
         print(status["message"])
         if server and "tools/serve.py" in changed.splitlines():
-            print("The helper itself changed, so it's restarting.")
-            restart.set()
-            threading.Thread(target=server.shutdown, daemon=True).start()
+            restart_soon(server, "The helper itself changed, so it's restarting.")
         return {"updated": True, "message": status["message"]}
 
 
@@ -499,12 +497,39 @@ def update_once() -> str | None:
     return git("diff", "--name-only", before, upstream)
 
 
-def keep_updated(server: ThreadingHTTPServer) -> None:
-    """Pull new versions in the background. Pages reload themselves; the helper restarts itself if it changed."""
-    status["auto"] = True
+HELPER = Path(__file__).resolve()
+
+
+def fingerprint() -> bytes:
+    try:
+        return HELPER.read_bytes()
+    except OSError:
+        return b""
+
+
+def restart_soon(server: ThreadingHTTPServer, reason: str) -> None:
+    print(reason)
+    restart.set()
+    threading.Thread(target=server.shutdown, daemon=True).start()
+
+
+def keep_updated(server: ThreadingHTTPServer, update: bool) -> None:
+    """Pull new versions in the background, and restart when this file changes on disk.
+
+    Pages reload themselves. The helper restarts whenever its own code changes, whoever
+    changed it: its own pull, a `git pull` by hand, or an edit.
+    """
+    status["auto"] = update
+    loaded = fingerprint()
     while not restart.is_set():
         time.sleep(UPDATE_EVERY)
-        check_for_update(server)
+        try:
+            if update:
+                check_for_update(server)
+            if not restart.is_set() and fingerprint() != loaded:
+                restart_soon(server, "The helper's code changed on disk, so it's restarting.")
+        except Exception as err:  # noqa: BLE001 - this loop must never die quietly
+            print(f"Update check failed: {err}")
 
 
 def install() -> None:
@@ -636,8 +661,9 @@ def main() -> None:
     if advertiser:
         print(f"  http://{args.name}.local{suffix}")
     print(f"  http://{ip}{suffix}")
-    if not args.no_update and (ROOT / ".git").exists():
-        threading.Thread(target=keep_updated, args=(server,), daemon=True).start()
+    update = not args.no_update and (ROOT / ".git").exists()
+    threading.Thread(target=keep_updated, args=(server, update), daemon=True).start()
+    if update:
         print("New versions on GitHub are picked up within a minute, and open pages reload by themselves.")
     print("Press Ctrl+C to stop.")
     try:

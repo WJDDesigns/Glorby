@@ -103,7 +103,9 @@ export async function findLamps({ hints = [], onLamp = () => {}, onProgress = ()
         if (isGlorb(info)) report({ address: info.ip || host, name: info.name || "Glorb", mac: info.mac, ver: info.ver });
       }));
     }
-    return { lamps: [...found.values()], via: "helper", others: helper.others || 0, warning: helper.blocked };
+    // Found from this page but not by the helper: the helper can't see the network.
+    const helperBlind = found.size > 0 && !helper.lamps.length;
+    return { lamps: [...found.values()], via: "helper", others: helper.others || 0, warning: helper.blocked, helperBlind };
   }
 
   if (location.protocol === "https:") return { lamps: [], via: "none", blocked: true };
