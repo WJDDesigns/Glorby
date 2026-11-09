@@ -14,7 +14,7 @@ ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with two additions:
   networks that block ping are left alone. Settings live under `NetWatchdog` in `cfg.json`,
   and counters show in `/json/info` under `netwd`.
 - `usermods/glorby_lease`: when a Glorby page has claimed the lamp (main segment named
-  `Glorby …`) and no JSON has arrived for 30 s, it ends the claim: live override off,
+  `Glorby …`) and no JSON has arrived for 60 s (longer than a Wi-Fi dropout), it ends the claim: live override off,
   segments unfrozen, name cleared, and the boot preset applied (or Colorwaves if none).
   That way a page that disappears without handing back, for example because the Mac slept,
   can't leave the lamp dark. Settings live under `GlorbyLease`, and `/json/info` shows `lease`.

@@ -7,7 +7,7 @@
 
 class GlorbyLease : public Usermod {
   bool enabled = true;
-  uint16_t leaseS = 30;
+  uint16_t leaseS = 60;  // longer than a Wi-Fi dropout, so a live page keeps its claim
   unsigned long lastJson = 0;
   unsigned long lastCheck = 0;
   uint32_t released = 0;
