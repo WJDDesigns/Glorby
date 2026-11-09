@@ -12,7 +12,7 @@ fi
 for um in "$here"/usermods/*/; do
   name="$(basename "$um")"
   rm -rf "$work/usermods/$name"
-  cp -r "$um" "$work/usermods/"
+  cp -r "${um%/}" "$work/usermods/"
 done
 cp "$here/platformio_override.ini" "$work/platformio_override.ini"
 pio="$(command -v pio || true)"
