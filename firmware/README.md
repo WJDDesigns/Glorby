@@ -6,13 +6,18 @@ still lists it as connected. Only a restart brings it back, and the firmware's o
 sometimes takes 19 minutes and sometimes never comes.
 
 This folder builds stock [WLED](https://github.com/wled/WLED) (v16.0.1, Arduino core 2.0.18 /
-ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with one addition:
+ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with two additions:
 
-- `usermods/net_watchdog`: pings the gateway every 15 s. After 4 misses in a row while
+- `usermods/net_watchdog`: pings the gateway every 5 s. After 3 misses in a row while
   Wi-Fi still says "connected", it forces a Wi-Fi reconnect. If the gateway is still silent
-  2 minutes later, it restarts the lamp. It only arms once the gateway has answered, so
+  60 s later, it restarts the lamp. It only arms once the gateway has answered, so
   networks that block ping are left alone. Settings live under `NetWatchdog` in `cfg.json`,
   and counters show in `/json/info` under `netwd`.
+- `usermods/glorby_lease`: when a Glorby page has claimed the lamp (main segment named
+  `Glorby …`) and no JSON has arrived for 30 s, it ends the claim: live override off,
+  segments unfrozen, name cleared, and the boot preset applied (or Colorwaves if none).
+  That way a page that disappears without handing back, for example because the Mac slept,
+  can't leave the lamp dark. Settings live under `GlorbyLease`, and `/json/info` shows `lease`.
 
 The build uses the lamp's existing partition table (`WLED_ESP32_8MB.csv`, identical to
 GLORB's), so it installs over Wi-Fi from the lamp's `/update` page and keeps `cfg.json`,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Glorby's lamp firmware: stock WLED plus the network watchdog, for the Glorb's ESP32-S3.
+# Builds Glorby's lamp firmware: stock WLED plus the network watchdog and the Glorby lease, for the Glorb's ESP32-S3.
 # Output: firmware/build/glorby-wled.bin, an app image for the lamp's /update page (Wi-Fi OTA).
 set -euo pipefail
 WLED_TAG="${WLED_TAG:-v16.0.1}"
@@ -9,8 +9,11 @@ mkdir -p "$here/build"
 if [ ! -d "$work/.git" ]; then
   git clone --depth 1 --branch "$WLED_TAG" https://github.com/wled/WLED.git "$work"
 fi
-rm -rf "$work/usermods/net_watchdog"
-cp -r "$here/usermods/net_watchdog" "$work/usermods/"
+for um in "$here"/usermods/*/; do
+  name="$(basename "$um")"
+  rm -rf "$work/usermods/$name"
+  cp -r "$um" "$work/usermods/"
+done
 cp "$here/platformio_override.ini" "$work/platformio_override.ini"
 pio="$(command -v pio || true)"
 if [ -z "$pio" ]; then
