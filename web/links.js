@@ -13,6 +13,12 @@ const LAMP_BACKLOG = 4096;
 // so two pages never paint the lamp at once.
 const CLAIM = "Glorby ";
 const CLAIM_CHECK_MS = 2500;
+
+/** The lamp's own effect, as a Glorby claim name ("Glorby abc123~67") carries it, or null. */
+function claimedFx(name) {
+  const match = /~(\d+)$/.exec(String(name || ""));
+  return match ? Number(match[1]) : null;
+}
 // The Glorb firmware's own add-on, in the lamp's settings.
 const ADDON = "GLORB";
 
@@ -171,7 +177,9 @@ export class WledLink {
         others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
         // The lamp's own effect, put back afterward. Glorb firmware's add-on draws its
         // effect even on a frozen segment, so the segment is switched to plain Solid.
-        fx: takenOver ? null : current.fx ?? null,
+        // A page taking over from another Glorby page (often its own earlier copy, before a
+        // reload) reads the effect that page saved in the claim name.
+        fx: takenOver ? claimedFx(current.n) : current.fx ?? null,
         addons: null,
       };
       // The firmware's own Glorb add-on flashes its own lights over the frames once a second.
@@ -180,7 +188,8 @@ export class WledLink {
       // back on when done.
       this.claim.addons = await this._restAddon(takenOver).catch(() => null);
     }
-    this.claimed = `${CLAIM}${this.token}`;
+    // The lamp's own effect rides in the claim name, so whoever takes over can still put it back.
+    this.claimed = `${CLAIM}${this.token}${this.claim.fx !== null ? `~${this.claim.fx}` : ""}`;
     await this._post({
       on: true,
       lor: 2,
@@ -304,13 +313,22 @@ export class WledLink {
     this.claim = null;
     this.claimed = null;
     if (claim.addons) this._settings(claim.addons).catch(() => {});
-    return this._post({
+    const handed = this._post({
       lor: 0,
       seg: [
         { id: this._mainSegment(), frz: false, n: claim.name, ...(claim.fx !== null ? { fx: claim.fx } : {}) },
         ...claim.others.map((id) => ({ id, on: true })),
       ],
-    }).catch(() => {});
+    });
+    // With no effect to put back, the lamp would sit on plain Solid. Its start-up preset
+    // brings back a proper look instead.
+    if (claim.fx === null) {
+      return handed
+        .then(() => this._get("/json/cfg"))
+        .then((cfg) => cfg?.def?.ps > 0 && this._post({ ps: cfg.def.ps }))
+        .catch(() => {});
+    }
+    return handed.catch(() => {});
   }
 
   _open() {
