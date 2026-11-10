@@ -478,18 +478,33 @@ export class WledLink {
       this.nativeOn = true;
       await this._post({ on: true, lor: 0, seg: [{ id: this._mainSegment(), n: NATIVE, ...seg }] });
     }
-    this._saveSoon();
+    this._saveSoon(seg);
   }
 
   /** Keep the lamp's effect as its start-up look, once the settings stop changing (to spare its flash). */
-  _saveSoon() {
+  _saveSoon(seg) {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(async () => {
       if (!this.nativeOn) return;
+      // Only write the flash when the look differs from the one saved last.
+      const look = JSON.stringify(seg);
+      let saved = null;
+      try {
+        saved = localStorage.getItem(`glorby.saved.${this.base}`);
+      } catch {
+        // Without storage, every settled change is saved.
+      }
+      if (look === saved) return;
       try {
         await this._post({ psave: NATIVE_PRESET, n: "Glorby", ib: true, sb: true });
+        try {
+          localStorage.setItem(`glorby.saved.${this.base}`, look);
+        } catch {
+          // Nothing to remember it in.
+        }
         const cfg = await this._get("/json/cfg");
-        if (cfg?.def?.ps !== NATIVE_PRESET) {
+        // A start-up preset chosen by hand is left alone.
+        if ([0, 1, undefined].includes(cfg?.def?.ps)) {
           await fetch(`${this.base}/json/cfg`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
