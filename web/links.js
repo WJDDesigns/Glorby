@@ -383,6 +383,7 @@ export class WledLink {
         if (data.state) {
           this.lamp.state = data.state;
           this._restoreOwed(data.state);
+          this._guardNative(data.state);
           if (this._takenBy(data.state)) this._yield();
         }
         if (data.info) this.lamp.info = data.info;
@@ -469,6 +470,9 @@ export class WledLink {
       if (claim.addons) await this._settings(claim.addons).catch(() => {});
       this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
       this.local.onRelease = () => this._handBack();
+      // Frames already on their way over the socket must land before the lamp's own effect
+      // starts, or the last of them would leave it on a still picture.
+      await new Promise((done) => setTimeout(done, 250));
       await this._post({
         on: true,
         lor: 0,
@@ -478,7 +482,22 @@ export class WledLink {
       this.nativeOn = true;
       await this._post({ on: true, lor: 0, seg: [{ id: this._mainSegment(), n: NATIVE, ...seg }] });
     }
+    this.nativeSeg = seg;
     this._saveSoon(seg);
+  }
+
+  /**
+   * While the lamp runs a Glorby effect by itself, put it back if the lamp turns up on plain
+   * Solid under Glorby's name without this page asking for that.
+   */
+  _guardNative(state) {
+    if (!this.nativeOn || !this.nativeSeg || performance.now() - (this.wledAt || -1e9) < 10000) return;
+    const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
+    if (main?.n !== NATIVE || main.fx !== 0 || this.nativeSeg.fx === 0) return;
+    if (performance.now() - (this.guardedAt || -1e9) < 5000) return;
+    this.guardedAt = performance.now();
+    console.warn(`Glorby: the lamp dropped to Solid at ${new Date().toISOString()}; putting ${this.nativeSeg.fx} back`, main);
+    this._post({ on: true, lor: 0, seg: [{ id: this._mainSegment(), n: NATIVE, ...this.nativeSeg }] }).catch(() => {});
   }
 
   /** Keep the lamp's effect as its start-up look, once the settings stop changing (to spare its flash). */
@@ -539,6 +558,9 @@ export class WledLink {
     }
     if (this.local.handle(type, extra)) return undefined;
     if (type === "glorb/wled") {
+      this.wledAt = performance.now();
+      // The lamp's own effects aren't Glorby's, so its name stops saying so.
+      const unnamed = this.nativeOn && (extra.fx !== undefined || extra.preset !== undefined) ? { n: "" } : {};
       if (this.local.running) {
         this.local.onRelease = () => {};
         this.local.release();
@@ -546,7 +568,7 @@ export class WledLink {
         await this._handBack();
       }
       if (extra.preset !== undefined) return this._post({ ps: extra.preset });
-      if (extra.fx !== undefined) return this._post({ seg: [{ fx: extra.fx }] });
+      if (extra.fx !== undefined) return this._post({ seg: [{ fx: extra.fx, ...unnamed }] });
       if (extra.seg) return this._post({ seg: [extra.seg] });
     }
     throw new Error(`${type} isn't available on this connection`);
