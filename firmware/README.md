@@ -21,7 +21,8 @@ ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with these additions:
 - `usermods/glorby_fx`: Glorby's sphere effects running on the lamp itself, so they keep
   playing with no browser or Home Assistant attached, and presets bring them back after a
   restart. They show up in WLED's effect list as `Glorby <name>`, and Glorby's 16 palettes
-  as `Glorby: <name>`. So far: the Geometry set (Sweep, Plane Scanner, Comets, Gyroscope,
+  as `Glorby: <name>`. So far: the Ambient set (Aurora, Nebula, Plasma, Lava Lamp, Deep Ocean,
+  Fireball, Starfield, Matrix) and the Geometry set (Sweep, Plane Scanner, Comets, Gyroscope,
   Barber Spiral, Interference, Polygon Dance, Pentagon Bloom, Life on a Sphere, Snake,
   Raindrops, Disco Ball). Settings map onto WLED's sliders; speed 64 is the web app's 1x.
   `glorby_geo.h` is generated from `web/lamp-map.json` by `tools/gen_geometry.py`.

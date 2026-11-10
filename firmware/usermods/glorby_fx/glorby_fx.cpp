@@ -50,6 +50,43 @@ static inline float nrand() {  // standard normal
 }
 static inline void randomUnit(float *o) { o[0] = nrand(); o[1] = nrand(); o[2] = nrand(); unit3(o); }
 
+
+// Gradient noise, the same tables and maths as sphere.js, so effects match the web app.
+static inline float fadeN(float f) { return f * f * f * (f * (f * 6 - 15) + 10); }
+static float noise3(float x, float y, float z) {
+  const float fx0 = floorf(x), fy0 = floorf(y), fz0 = floorf(z);
+  const float fx = x - fx0, fy = y - fy0, fz = z - fz0;
+  const float ux = fadeN(fx), uy = fadeN(fy), uz = fadeN(fz);
+  const int cx = (int)fx0 & 255, cy = (int)fy0 & 255, cz = (int)fz0 & 255;
+  float out = 0;
+  for (int dx = 0; dx < 2; dx++) {
+    const float wx = dx ? ux : 1 - ux;
+    const int px = NOISE_PERM[(cx + dx) & 255];
+    for (int dy = 0; dy < 2; dy++) {
+      const float wy = dy ? uy : 1 - uy;
+      const int py = NOISE_PERM[(px + cy + dy) & 255];
+      for (int dz = 0; dz < 2; dz++) {
+        const float wz = dz ? uz : 1 - uz;
+        const float *g = NOISE_GRAD[NOISE_PERM[(py + cz + dz) & 255]];
+        out += wx * wy * wz * (g[0] * (fx - dx) + g[1] * (fy - dy) + g[2] * (fz - dz));
+      }
+    }
+  }
+  return out * 1.9f;
+}
+static float fbm(float x, float y, float z, int octaves = 3) {
+  float total = 0, amp = 1, norm = 0;
+  for (int i = 0; i < octaves; i++) {
+    total += noise3(x, y, z) * amp;
+    norm += amp;
+    amp *= 0.5f;
+    x = x * 2.03f + 11.7f;
+    y = y * 2.03f + 11.7f;
+    z = z * 2.03f + 11.7f;
+  }
+  return total / norm;
+}
+
 static float LAT[N], LON[N];
 static CRGBPalette16 RAINBOW;  // Glorby's Rainbow, filled in setup()
 
@@ -448,6 +485,181 @@ static void mode_disco() {
 }
 static const char _data_disco[] PROGMEM = "Glorby Disco Ball@!,,Spots;,Base;;;sx=64,c1=116";
 
+
+// ---- Ambient ----------------------------------------------------------------
+
+// Aurora: curtains of light round the upper sphere.
+static void mode_aurora() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float height = slider(SEGMENT.intensity, -1.f, 1.f);
+  for (int i = 0; i < N; i++) {
+    const float *p = GEO_POS[i];
+    float curtain = fbm(p[0] * 1.4f, p[1] * 1.4f, s->clock * 0.25f, 3);
+    float x = (p[2] - height - curtain * 0.35f) / 0.42f;
+    float band = expf(-x * x);
+    float shimmer = 0.6f + 0.4f * sinf(LON[i] * 7 + s->clock * 2 + curtain * 7);
+    s->f.put(i, pal(0.25f + band * 0.55f + curtain * 0.2f, false), band * shimmer);
+  }
+  show(s->f);
+}
+static const char _data_aurora[] PROGMEM = "Glorby Aurora@!,Height;;!;;sx=64,ix=166";
+
+// Nebula: warped clouds of colour.
+static void mode_nebula() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float sc = slider(SEGMENT.intensity, 0.4f, 4.f);
+  const float c = s->clock;
+  for (int i = 0; i < N; i++) {
+    const float *p = GEO_POS[i];
+    float warp = fbm(p[0] * sc + c * 0.1f, p[1] * sc + c * 0.1f, p[2] * sc + c * 0.1f, 2) * 1.2f;
+    float field = fbm(p[0] * sc + warp, p[1] * sc + warp + c * 0.08f, p[2] * sc + warp, 3);
+    s->f.put(i, pal(0.5f + field * 0.9f, true), smooth(-0.45f, 0.25f, field));
+  }
+  show(s->f);
+}
+static const char _data_nebula[] PROGMEM = "Glorby Nebula@!,Scale;;!;;sx=38,ix=78";
+
+// Plasma: overlapping sine fields.
+static void mode_plasma() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float sc = slider(SEGMENT.intensity, 0.5f, 8.f);
+  const float t = s->clock;
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float v = sinf(x * sc + t) + sinf(y * sc * 0.8f - t * 1.3f) + sinf(z * sc * 1.2f + t * 0.7f) +
+              sinf((x + y + z) * sc * 0.7f + t * 1.7f);
+    s->f.put(i, pal(v * 0.125f + 0.5f + t * 0.03f, true));
+  }
+  show(s->f);
+}
+static const char _data_plasma[] PROGMEM = "Glorby Plasma@!,Scale;;!;;sx=64,ix=68";
+
+// Lava Lamp: metaballs drifting inside the sphere.
+struct LavaState : Base { float seed[9][3]; Frame f; };
+static void mode_lava() {
+  bool fresh;
+  auto *s = begin<LavaState>(fresh);
+  if (!s) return fallback();
+  if (fresh) for (int b = 0; b < 9; b++) for (int j = 0; j < 3; j++) s->seed[b][j] = frand() * 100;
+  const int blobs = (int)slider(SEGMENT.intensity, 2, 9.99f);
+  const float c = s->clock;
+  float total[N] = {0};
+  for (int b = 0; b < blobs; b++) {
+    const float *sd = s->seed[b];
+    float center[3] = {0.75f * sinf(c * 0.21f + sd[0]), 0.75f * sinf(c * 0.17f + sd[1]), 0.75f * sinf(c * (0.13f + b * 0.015f) + sd[2])};
+    for (int i = 0; i < N; i++) {
+      float dx = GEO_POS[i][0] - center[0], dy = GEO_POS[i][1] - center[1], dz = GEO_POS[i][2] - center[2];
+      total[i] += 0.22f / (dx * dx + dy * dy + dz * dz + 0.05f);
+    }
+  }
+  float mean = 0;
+  for (int i = 0; i < N; i++) mean += total[i];
+  mean /= N;
+  for (int i = 0; i < N; i++) s->f.put(i, pal(0.5f + (total[i] - mean) * 1.1f, false));
+  show(s->f);
+}
+static const char _data_lava[] PROGMEM = "Glorby Lava Lamp@!,Blobs;;!;;sx=64,ix=109";
+
+// Deep Ocean: caustics rippling over a deepening blue.
+static void mode_ocean() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float c = s->clock;
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float a = fbm(x * 2.2f + c * 0.2f, y * 2.2f, z * 2.2f + c * 0.12f, 2);
+    float b = fbm(x * 2.9f, y * 2.9f - c * 0.16f, z * 2.9f - c * 0.1f, 2);
+    float caustic = clampf(1 - fabsf(a - b) * 3.2f, 0, 1);
+    float depth = 0.25f + 0.4f * smooth(-1, 1, z);
+    s->f.put(i, pal(depth + caustic * caustic * caustic * 0.55f, false));
+  }
+  show(s->f);
+}
+static const char _data_ocean[] PROGMEM = "Glorby Deep Ocean@!;;!;;sx=64";
+
+// Fireball: flames licking up the sphere.
+static void mode_fireball() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float height = slider(SEGMENT.intensity, 0.1f, 1.f);
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float n = fbm(x * 2.5f, y * 2.5f, z * 1.3f - s->clock * 1.1f, 3);
+    float h = (z + 1) / 2;
+    s->f.put(i, pal(1.05f - h * (1.25f - height) + n * 0.45f, false));
+  }
+  show(s->f);
+}
+static const char _data_fireball[] PROGMEM = "Glorby Fireball@!,Flame height;;!;;sx=77,ix=156";
+
+// Starfield: twinkling stars on a night sky.
+struct StarState : Base { float v[N]; Frame f; };
+static void mode_stars() {
+  bool fresh;
+  auto *s = begin<StarState>(fresh);
+  if (!s) return fallback();
+  if (fresh) for (int i = 0; i < N; i++) s->v[i] = frand();
+  const float density = slider(SEGMENT.intensity, 0.02f, 1.f);
+  const float chance = density * s->dt * speedOf() * 2.5f;
+  const float decay = expf(-s->dt * speedOf() * 1.3f);
+  const RGBf tint = fromColor(SEGCOLOR(0)), sky = fromColor(SEGCOLOR(1));
+  for (int i = 0; i < N; i++) {
+    s->v[i] = frand() < chance ? 1.f : s->v[i] * decay;
+    float k = s->v[i] * s->v[i];
+    s->f.put(i, sky.r + tint.r * k, sky.g + tint.g * k, sky.b + tint.b * k);
+  }
+  show(s->f);
+}
+static const char _data_stars[] PROGMEM = "Glorby Starfield@!,Density;Tint,Night sky;;;sx=64,ix=60";
+
+// Matrix: streams of code falling down meridians, pole to pole.
+static constexpr int MAX_STREAMS = 14;
+struct MatrixState : Base { float lon[MAX_STREAMS], head[MAX_STREAMS], rate[MAX_STREAMS], glyph[N]; Frame f; };
+static inline float uniform(float lo, float hi) { return lo + (hi - lo) * frand(); }
+static void mode_matrix() {
+  bool fresh;
+  auto *s = begin<MatrixState>(fresh);
+  if (!s) return fallback();
+  if (fresh) {
+    for (int k = 0; k < MAX_STREAMS; k++) { s->lon[k] = uniform(-PI, PI); s->head[k] = uniform(0, PI + 1.5f); s->rate[k] = uniform(0.7f, 1.4f); }
+    for (int i = 0; i < N; i++) s->glyph[i] = uniform(0.35f, 1);
+  }
+  static constexpr float FALL = 0.9f, HEAD = 0.4f;
+  const float dt = s->dt * speedOf();
+  const int streams = (int)slider(SEGMENT.custom1, 2, MAX_STREAMS + 0.99f);
+  const float trail = slider(SEGMENT.intensity, 0.4f, 3.f);
+  for (int k = 0; k < MAX_STREAMS; k++) {
+    s->head[k] += s->rate[k] * FALL * dt;
+    if (s->head[k] > PI + trail) { s->lon[k] = uniform(-PI, PI); s->head[k] = uniform(-1.2f, 0); s->rate[k] = uniform(0.7f, 1.4f); }
+  }
+  for (int i = 0; i < N; i++) if (frand() < 6 * dt) s->glyph[i] = uniform(0.35f, 1);
+  const RGBf body = fromColor(SEGCOLOR(0)), leadC = fromColor(SEGCOLOR(1));
+  for (int i = 0; i < N; i++) {
+    const float down = PI / 2 - LAT[i];
+    float lit = 0, lead = 0;
+    for (int k = 0; k < streams; k++) {
+      float across = fabsf(modf_(LON[i] - s->lon[k] + PI, TWO_PI) - PI) * cosf(LAT[i]);
+      float column = 1 - smooth(0.2f, 0.4f, across);
+      float behind = s->head[k] - down;
+      bool ahead = behind < 0;
+      lit = fmaxf(lit, column * (ahead ? 0 : expf(-fmaxf(behind, 0) / (trail * 0.45f))));
+      lead = fmaxf(lead, column * (ahead || behind > HEAD ? 0 : 1));
+    }
+    float k = lit * s->glyph[i];
+    s->f.put(i, body.r * k * (1 - lead) + leadC.r * lead, body.g * k * (1 - lead) + leadC.g * lead, body.b * k * (1 - lead) + leadC.b * lead);
+  }
+  show(s->f);
+}
+static const char _data_matrix[] PROGMEM = "Glorby Matrix@!,Trail,Streams;Color,Lead color;;;sx=64,ix=108,c1=100";
+
 // ---- palettes -----------------------------------------------------------------
 
 struct PalDef { const char *name; uint8_t count; uint32_t stops[8]; };
@@ -516,6 +728,14 @@ class GlorbyFx : public Usermod {
     strip.addEffect(255, &mode_snake, _data_snake);
     strip.addEffect(255, &mode_raindrops, _data_raindrops);
     strip.addEffect(255, &mode_disco, _data_disco);
+    strip.addEffect(255, &mode_aurora, _data_aurora);
+    strip.addEffect(255, &mode_nebula, _data_nebula);
+    strip.addEffect(255, &mode_plasma, _data_plasma);
+    strip.addEffect(255, &mode_lava, _data_lava);
+    strip.addEffect(255, &mode_ocean, _data_ocean);
+    strip.addEffect(255, &mode_fireball, _data_fireball);
+    strip.addEffect(255, &mode_stars, _data_stars);
+    strip.addEffect(255, &mode_matrix, _data_matrix);
 
     RAINBOW = buildPalette(PALETTES[5]);
     removeUsermodPalettes(PAL_OWNER);
@@ -528,7 +748,7 @@ class GlorbyFx : public Usermod {
 
   void addToJsonInfo(JsonObject &root) override {
     JsonObject g = root.createNestedObject(F("glorbyfx"));
-    g[F("effects")] = 12;
+    g[F("effects")] = 20;
     g[F("palettes")] = sizeof(glorby::PALETTES) / sizeof(glorby::PALETTES[0]);
   }
 
