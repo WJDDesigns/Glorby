@@ -108,7 +108,7 @@ export class WledLink {
       this._get("/presets.json").catch(() => ({})),
     ]);
     this.cells = map.cells;
-    this.native = nativeCatalog(effects, palettes);
+    this.native = nativeCatalog(effects, fxdata, palettes);
     await this.local.ready(map);
     const named = {};
     Object.entries(presets).forEach(([id, preset]) => {
@@ -158,6 +158,9 @@ export class WledLink {
     const socket = this.socket;
     const now = performance.now();
     if (this.nativeOn || !this.cells || socket?.readyState !== WebSocket.OPEN) return;
+    // Frames change the lamp's effect, so they only go out under a claim the lamp is known to
+    // hold. After a reconnect that waits for the claim to be checked.
+    if (!this.claimed || !this.confirmed) return;
     // A slow lamp gets fewer frames rather than a growing queue.
     // Checked from the frame loop, which keeps going in a background tab when timers slow down.
     if (now - (this.checkedAt || 0) > CLAIM_CHECK_MS) {
@@ -215,6 +218,7 @@ export class WledLink {
       seg: [{ id: main, n: this.claimed, fx: 0 }, ...this.claim.others.map((id) => ({ id, on: false }))],
     });
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
+    this.confirmed = true;
     this.checkedAt = performance.now();
   }
 
@@ -302,14 +306,16 @@ export class WledLink {
   }
 
   /** Stop if another page or device has taken the lamp since, and claim it again after a restart. */
-  async _checkClaim() {
+  async _checkClaim(reconnected = false) {
     if (!this.local.running || !this.claimed) return;
     try {
       const state = await this._get("/json/state");
       if (this._takenBy(state)) this._yield();
-      else if (this._lostClaim(state)) this._claim();
+      else if (this._lostClaim(state)) await this._claim();
+      else this.confirmed = true;
     } catch {
-      // The lamp being briefly unreachable isn't a takeover.
+      // The lamp being briefly unreachable isn't a takeover. After a reconnect, try again soon.
+      if (reconnected) setTimeout(() => this._checkClaim(true), RETRY_MS);
     }
   }
 
@@ -365,8 +371,10 @@ export class WledLink {
     socket.onopen = () => {
       this.owedChecked = false;
       socket.send(JSON.stringify({ lv: !this.local.running }));
-      // The lamp may have restarted while away, which forgets the claim.
-      if (this.local.running && this.claimed) this._claim().catch(() => {});
+      // The lamp may have restarted or been taken while away, so check the claim before
+      // sending frames again.
+      this.confirmed = false;
+      if (this.local.running && this.claimed) this._checkClaim(true);
     };
     socket.onmessage = (event) => {
       this.heard = Date.now();
