@@ -6,7 +6,7 @@ still lists it as connected. Only a restart brings it back, and the firmware's o
 sometimes takes 19 minutes and sometimes never comes.
 
 This folder builds stock [WLED](https://github.com/wled/WLED) (v16.0.1, Arduino core 2.0.18 /
-ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with two additions:
+ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with these additions:
 
 - `usermods/net_watchdog`: pings the gateway every 5 s. After 3 misses in a row while
   Wi-Fi still says "connected", it forces a Wi-Fi reconnect. If the gateway is still silent
@@ -18,6 +18,13 @@ ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with two additions:
   segments unfrozen, name cleared, and the boot preset applied (or Colorwaves if none).
   That way a page that disappears without handing back, for example because the Mac slept,
   can't leave the lamp dark. Settings live under `GlorbyLease`, and `/json/info` shows `lease`.
+- `usermods/glorby_fx`: Glorby's sphere effects running on the lamp itself, so they keep
+  playing with no browser or Home Assistant attached, and presets bring them back after a
+  restart. They show up in WLED's effect list as `Glorby <name>`, and Glorby's 16 palettes
+  as `Glorby: <name>`. So far: the Geometry set (Sweep, Plane Scanner, Comets, Gyroscope,
+  Barber Spiral, Interference, Polygon Dance, Pentagon Bloom, Life on a Sphere, Snake,
+  Raindrops, Disco Ball). Settings map onto WLED's sliders; speed 64 is the web app's 1x.
+  `glorby_geo.h` is generated from `web/lamp-map.json` by `tools/gen_geometry.py`.
 
 The build uses the lamp's existing partition table (`WLED_ESP32_8MB.csv`, identical to
 GLORB's), so it installs over Wi-Fi from the lamp's `/update` page and keeps `cfg.json`,
