@@ -2,6 +2,7 @@
 // Home Assistant runs effects itself. The other links run them here, in the browser.
 
 import { LocalStudio } from "./local.js";
+import { nativeCatalog, nativeSegment } from "./native.js";
 
 const STALE_MS = 8000;
 const RETRY_MS = 3000;
@@ -12,7 +13,28 @@ const LAMP_BACKLOG = 4096;
 // page or device that sees a different name there knows it has been taken over and stops,
 // so two pages never paint the lamp at once.
 const CLAIM = "Glorby ";
+// The name a lamp carries while it runs a Glorby effect by itself. A page streaming effects
+// treats it as taken, and the firmware's lease leaves it alone.
+const NATIVE = "Glorby";
+// Where an effect the lamp runs by itself is saved, so it comes back after a restart.
+const NATIVE_PRESET = 250;
+const NATIVE_SAVE_MS = 8000;
 const CLAIM_CHECK_MS = 2500;
+
+/** The lamp's own effect, as a Glorby claim name ("Glorby abc123~67") carries it, or null. */
+function claimedFx(name) {
+  const match = /~(\d+)$/.exec(String(name || ""));
+  return match ? knownFx(Number(match[1])) : null;
+}
+
+/**
+ * An effect worth putting back, or null. Plain Solid (0) is what a claim leaves the lamp on,
+ * so finding it usually means an earlier page never put the real effect back. Treating it as
+ * unknown makes the hand-back use the lamp's startup preset instead of staying on one colour.
+ */
+function knownFx(fx) {
+  return Number.isInteger(fx) && fx > 0 ? fx : null;
+}
 // The Glorb firmware's own add-on, in the lamp's settings.
 const ADDON = "GLORB";
 
@@ -41,6 +63,8 @@ export class WledLink {
       onChange: () => this._emit(this.available),
       onRelease: () => this._handBack(),
     });
+    this.native = { fx: {}, pal: {} };
+    this.nativeOn = false;
     this.token = Math.random().toString(36).slice(2, 8);
     // Closing the page while effects play gives the lamp back, add-on included.
     addEventListener("pagehide", () => this.local.release());
@@ -84,6 +108,7 @@ export class WledLink {
       this._get("/presets.json").catch(() => ({})),
     ]);
     this.cells = map.cells;
+    this.native = nativeCatalog(effects, fxdata, palettes);
     await this.local.ready(map);
     const named = {};
     Object.entries(presets).forEach(([id, preset]) => {
@@ -132,7 +157,10 @@ export class WledLink {
     this.handlers.forEach((handler) => handler({ rgb: display }));
     const socket = this.socket;
     const now = performance.now();
-    if (!this.cells || socket?.readyState !== WebSocket.OPEN) return;
+    if (this.nativeOn || !this.cells || socket?.readyState !== WebSocket.OPEN) return;
+    // Frames change the lamp's effect, so they only go out under a claim the lamp is known to
+    // hold. After a reconnect that waits for the claim to be checked.
+    if (!this.claimed || !this.confirmed) return;
     // A slow lamp gets fewer frames rather than a growing queue.
     // Checked from the frame loop, which keeps going in a background tab when timers slow down.
     if (now - (this.checkedAt || 0) > CLAIM_CHECK_MS) {
@@ -165,13 +193,15 @@ export class WledLink {
     const segments = this.lamp.state.seg || [];
     if (!this.claim) {
       const current = segments.find((seg) => seg.id === main) || {};
-      const takenOver = String(current.n || "").startsWith(CLAIM);
+      const takenOver = String(current.n || "").startsWith(CLAIM) || current.n === NATIVE;
       this.claim = {
         name: takenOver ? "" : current.n || "",
         others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
         // The lamp's own effect, put back afterward. Glorb firmware's add-on draws its
         // effect even on a frozen segment, so the segment is switched to plain Solid.
-        fx: takenOver ? null : current.fx ?? null,
+        // A page taking over from another Glorby page (often its own earlier copy, before a
+        // reload) reads the effect that page saved in the claim name.
+        fx: takenOver ? claimedFx(current.n) : knownFx(current.fx),
         addons: null,
       };
       // The firmware's own Glorb add-on flashes its own lights over the frames once a second.
@@ -180,13 +210,15 @@ export class WledLink {
       // back on when done.
       this.claim.addons = await this._restAddon(takenOver).catch(() => null);
     }
-    this.claimed = `${CLAIM}${this.token}`;
+    // The lamp's own effect rides in the claim name, so whoever takes over can still put it back.
+    this.claimed = `${CLAIM}${this.token}${this.claim.fx !== null ? `~${this.claim.fx}` : ""}`;
     await this._post({
       on: true,
       lor: 2,
       seg: [{ id: main, n: this.claimed, fx: 0 }, ...this.claim.others.map((id) => ({ id, on: false }))],
     });
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: false }));
+    this.confirmed = true;
     this.checkedAt = performance.now();
   }
 
@@ -225,13 +257,25 @@ export class WledLink {
   }
 
   /** Put back an add-on this browser left resting, once no page is playing on the lamp. */
-  _restoreOwed(state) {
+  async _restoreOwed(state) {
     if (this.owedChecked || this.local.running) return;
     this.owedChecked = true;
     const owed = this._rested();
     const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
     if (!owed || String(main?.n || "").startsWith(CLAIM)) return;
-    this._settings(owed).catch(() => {});
+    try {
+      // Firmware without the add-on (Glorby's own build, plain WLED) has nothing to put back,
+      // and only add-ons this firmware still has are written.
+      const um = (await this._get("/json/cfg")).um || {};
+      if (!um[ADDON]) {
+        this._rested(null);
+        return;
+      }
+      const still = Object.fromEntries(Object.entries(owed).filter(([name]) => name in um));
+      await this._settings(still);
+    } catch {
+      // The lamp didn't answer. The record stays, so the next visit tries again.
+    }
   }
 
   _settings(addons) {
@@ -249,7 +293,7 @@ export class WledLink {
   _takenBy(state) {
     const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
     const name = String(main?.n || "");
-    return !!this.claimed && name.startsWith(CLAIM) && name !== this.claimed;
+    return !!this.claimed && (name.startsWith(CLAIM) || name === NATIVE) && name !== this.claimed;
   }
 
   /**
@@ -262,14 +306,16 @@ export class WledLink {
   }
 
   /** Stop if another page or device has taken the lamp since, and claim it again after a restart. */
-  async _checkClaim() {
+  async _checkClaim(reconnected = false) {
     if (!this.local.running || !this.claimed) return;
     try {
       const state = await this._get("/json/state");
       if (this._takenBy(state)) this._yield();
-      else if (this._lostClaim(state)) this._claim();
+      else if (this._lostClaim(state)) await this._claim();
+      else this.confirmed = true;
     } catch {
-      // The lamp being briefly unreachable isn't a takeover.
+      // The lamp being briefly unreachable isn't a takeover. After a reconnect, try again soon.
+      if (reconnected) setTimeout(() => this._checkClaim(true), RETRY_MS);
     }
   }
 
@@ -287,18 +333,32 @@ export class WledLink {
 
   /** Give the lamp back its own effect, and live data back to Home Assistant, after effects here stop. */
   _handBack() {
+    // The lamp is running the effect by itself, so it keeps going after the page lets go.
+    if (this.nativeOn && !this.claim) {
+      this.nativeOn = false;
+      return Promise.resolve();
+    }
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
     const claim = this.claim || { name: "", others: [], fx: null, addons: null };
     this.claim = null;
     this.claimed = null;
     if (claim.addons) this._settings(claim.addons).catch(() => {});
-    return this._post({
+    const handed = this._post({
       lor: 0,
       seg: [
         { id: this._mainSegment(), frz: false, n: claim.name, ...(claim.fx !== null ? { fx: claim.fx } : {}) },
         ...claim.others.map((id) => ({ id, on: true })),
       ],
-    }).catch(() => {});
+    });
+    // With no effect to put back, the lamp would sit on plain Solid. Its start-up preset
+    // brings back a proper look instead.
+    if (claim.fx === null) {
+      return handed
+        .then(() => this._get("/json/cfg"))
+        .then((cfg) => cfg?.def?.ps > 0 && this._post({ ps: cfg.def.ps }))
+        .catch(() => {});
+    }
+    return handed.catch(() => {});
   }
 
   _open() {
@@ -311,8 +371,10 @@ export class WledLink {
     socket.onopen = () => {
       this.owedChecked = false;
       socket.send(JSON.stringify({ lv: !this.local.running }));
-      // The lamp may have restarted while away, which forgets the claim.
-      if (this.local.running && this.claimed) this._claim().catch(() => {});
+      // The lamp may have restarted or been taken while away, so check the claim before
+      // sending frames again.
+      this.confirmed = false;
+      if (this.local.running && this.claimed) this._checkClaim(true);
     };
     socket.onmessage = (event) => {
       this.heard = Date.now();
@@ -321,6 +383,7 @@ export class WledLink {
         if (data.state) {
           this.lamp.state = data.state;
           this._restoreOwed(data.state);
+          this._guardNative(data.state);
           if (this._takenBy(data.state)) this._yield();
         }
         if (data.info) this.lamp.info = data.info;
@@ -379,16 +442,125 @@ export class WledLink {
     });
   }
 
+  /** The segment settings for the lamp to run the current effect itself, or null. */
+  _nativeNow() {
+    const now = this.local.engine?.snapshot() || {};
+    return now.effect ? nativeSegment(this.native, now.effect, now.params, this.local.engine.globals) : null;
+  }
+
+  /**
+   * After the effect or its settings change: let the lamp run it by itself when its firmware
+   * can, and otherwise claim the lamp and stream frames from here.
+   */
+  async _route() {
+    const seg = this.local.running ? this._nativeNow() : null;
+    if (!seg) {
+      if (this.nativeOn) this.nativeOn = false;
+      if (this.local.running && !this.claimed) await this._claim();
+      return;
+    }
+    this.channel?.postMessage({ claim: this.token });
+    if (this.claim) {
+      // Streaming stops, and the lamp takes the effect over itself.
+      this.local.onRelease = () => {};
+      this.nativeOn = true;
+      const claim = this.claim;
+      this.claim = null;
+      this.claimed = null;
+      if (claim.addons) await this._settings(claim.addons).catch(() => {});
+      this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
+      this.local.onRelease = () => this._handBack();
+      // Frames already on their way over the socket must land before the lamp's own effect
+      // starts, or the last of them would leave it on a still picture.
+      await new Promise((done) => setTimeout(done, 250));
+      await this._post({
+        on: true,
+        lor: 0,
+        seg: [{ id: this._mainSegment(), n: NATIVE, ...seg }, ...claim.others.map((id) => ({ id, on: true }))],
+      });
+    } else {
+      this.nativeOn = true;
+      await this._post({ on: true, lor: 0, seg: [{ id: this._mainSegment(), n: NATIVE, ...seg }] });
+    }
+    this.nativeSeg = seg;
+    this._saveSoon(seg);
+  }
+
+  /**
+   * While the lamp runs a Glorby effect by itself, put it back if the lamp turns up on plain
+   * Solid under Glorby's name without this page asking for that.
+   */
+  _guardNative(state) {
+    if (!this.nativeOn || !this.nativeSeg || performance.now() - (this.wledAt || -1e9) < 10000) return;
+    const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
+    if (main?.n !== NATIVE || main.fx !== 0 || this.nativeSeg.fx === 0) return;
+    if (performance.now() - (this.guardedAt || -1e9) < 5000) return;
+    this.guardedAt = performance.now();
+    console.warn(`Glorby: the lamp dropped to Solid at ${new Date().toISOString()}; putting ${this.nativeSeg.fx} back`, main);
+    this._post({ on: true, lor: 0, seg: [{ id: this._mainSegment(), n: NATIVE, ...this.nativeSeg }] }).catch(() => {});
+  }
+
+  /** Keep the lamp's effect as its start-up look, once the settings stop changing (to spare its flash). */
+  _saveSoon(seg) {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(async () => {
+      if (!this.nativeOn) return;
+      // Only write the flash when the look differs from the one saved last.
+      const look = JSON.stringify(seg);
+      let saved = null;
+      try {
+        saved = localStorage.getItem(`glorby.saved.${this.base}`);
+      } catch {
+        // Without storage, every settled change is saved.
+      }
+      if (look === saved) return;
+      try {
+        await this._post({ psave: NATIVE_PRESET, n: "Glorby", ib: true, sb: true });
+        try {
+          localStorage.setItem(`glorby.saved.${this.base}`, look);
+        } catch {
+          // Nothing to remember it in.
+        }
+        const cfg = await this._get("/json/cfg");
+        // A start-up preset chosen by hand is left alone.
+        if ([0, 1, undefined].includes(cfg?.def?.ps)) {
+          await fetch(`${this.base}/json/cfg`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ def: { ps: NATIVE_PRESET } }),
+          });
+        }
+      } catch {
+        // Not saved: the effect still runs, it just won't come back after a restart.
+      }
+    }, NATIVE_SAVE_MS);
+  }
+
   async call(type, extra = {}) {
     if (type === "glorb/power") {
       if (extra.on === false) this.local.release();
       return this._post(extra);
+    }
+    if (["glorb/play", "glorb/look_play", "glorb/params", "glorb/globals"].includes(type)) {
+      this.local.handle(type, extra);
+      return this._route();
+    }
+    if (type === "glorb/alert" && this.nativeOn) {
+      // Alerts are drawn here, so stream for the alert, then hand the effect back to the lamp.
+      this.nativeOn = false;
+      await this._claim();
+      this.local.handle(type, extra);
+      setTimeout(() => this._route(), (Math.max(0.1, Number(extra.duration) || 3) + 0.5) * 1000);
+      return undefined;
     }
     if (type === "glorb/play" || type === "glorb/look_play" || (type === "glorb/alert" && !this.local.running)) {
       await this._claim();
     }
     if (this.local.handle(type, extra)) return undefined;
     if (type === "glorb/wled") {
+      this.wledAt = performance.now();
+      // The lamp's own effects aren't Glorby's, so its name stops saying so.
+      const unnamed = this.nativeOn && (extra.fx !== undefined || extra.preset !== undefined) ? { n: "" } : {};
       if (this.local.running) {
         this.local.onRelease = () => {};
         this.local.release();
@@ -396,7 +568,7 @@ export class WledLink {
         await this._handBack();
       }
       if (extra.preset !== undefined) return this._post({ ps: extra.preset });
-      if (extra.fx !== undefined) return this._post({ seg: [{ fx: extra.fx }] });
+      if (extra.fx !== undefined) return this._post({ seg: [{ fx: extra.fx, ...unnamed }] });
       if (extra.seg) return this._post({ seg: [extra.seg] });
     }
     throw new Error(`${type} isn't available on this connection`);

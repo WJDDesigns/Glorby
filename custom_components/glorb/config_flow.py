@@ -40,7 +40,13 @@ async def _probe(flow: ConfigFlow, host: str) -> dict[str, Any] | None:
 
 
 def _is_glorb(info: dict[str, Any]) -> bool:
-    return "GLORB" in str(info.get("ver", "")).upper()
+    """A Glorb on any firmware: the vendor's (version says GLORB), Glorby's own build (reports
+    a network watchdog and a GLORB release name), or plain WLED set up like a Glorb."""
+    if "GLORB" in f"{info.get('ver', '')} {info.get('release', '')}".upper() or "netwd" in info:
+        return True
+    leds = info.get("leds") or {}
+    matrix = leds.get("matrix") or {}
+    return leds.get("count") == 80 or (leds.get("count") == 120 and matrix.get("w") == 20 and matrix.get("h") == 6)
 
 
 class GlorbConfigFlow(ConfigFlow, domain=DOMAIN):

@@ -1,0 +1,682 @@
+"""Run the Glorby web app on this computer, find lamps for it, and answer at http://glorby.local.
+
+    python3 tools/serve.py            # http://glorby.local (or :5180 if port 80 is taken)
+    python3 tools/serve.py --port 5180 --name glorby
+
+Browsers can't search a network themselves, so this does it for them: the app asks
+/api/discover, and this looks for WLED's mDNS service and checks every address on
+the local network for a lamp, then the ranges next to it if nothing turned up. Only the Python standard library is needed.
+"""
+from __future__ import annotations
+
+import argparse
+import errno
+import functools
+import ipaddress
+import json
+import os
+import platform
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+MDNS_GROUP = "224.0.0.251"
+MDNS_PORT = 5353
+TYPE_A, TYPE_PTR, TYPE_ANY = 1, 12, 255
+
+
+# ---------------------------------------------------------------- network basics
+
+
+def local_ip() -> str:
+    """The address this computer uses on the local network. Nothing is sent."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def encode_name(name: str) -> bytes:
+    out = b""
+    for label in name.strip(".").split("."):
+        raw = label.encode()
+        out += bytes([len(raw)]) + raw
+    return out + b"\0"
+
+
+def read_name(data: bytes, offset: int) -> tuple[str, int]:
+    """Read a DNS name, following compression pointers. Returns the name and the offset after it."""
+    labels, end, jumps = [], None, 0
+    while True:
+        length = data[offset]
+        if length & 0xC0 == 0xC0:
+            if end is None:
+                end = offset + 2
+            offset = ((length & 0x3F) << 8) | data[offset + 1]
+            jumps += 1
+            if jumps > 20:
+                raise ValueError("name loops")
+            continue
+        offset += 1
+        if length == 0:
+            break
+        labels.append(data[offset:offset + length].decode(errors="replace"))
+        offset += length
+    return ".".join(labels), end if end is not None else offset
+
+
+def questions(data: bytes) -> list[tuple[str, int]]:
+    """The questions in an mDNS query, or nothing if the packet is a response."""
+    if len(data) < 12:
+        return []
+    _, flags, count = struct.unpack("!HHH", data[:6])
+    if flags & 0x8000:
+        return []
+    found, offset = [], 12
+    for _ in range(count):
+        name, offset = read_name(data, offset)
+        qtype, _ = struct.unpack("!HH", data[offset:offset + 4])
+        offset += 4
+        found.append((name.lower(), qtype))
+    return found
+
+
+# ---------------------------------------------------------------- finding lamps
+
+
+# Addresses where something answered at all (a page, an error, a refused connection).
+# A working network always has some; none at all means this program is being kept off it.
+answered: set[str] = set()
+
+
+def fetch_info(host: str, timeout: float = 1.5) -> dict | None:
+    try:
+        with urllib.request.urlopen(f"http://{host}/json/info", timeout=timeout) as response:
+            answered.add(host)
+            info = json.load(response)
+    except urllib.error.HTTPError:
+        answered.add(host)
+        return None
+    except urllib.error.URLError as err:
+        if isinstance(err.reason, ConnectionRefusedError):
+            answered.add(host)
+        return None
+    except ConnectionRefusedError:
+        answered.add(host)
+        return None
+    except (OSError, ValueError):
+        return None
+    return info if isinstance(info, dict) and info.get("leds") else None
+
+
+def is_glorb(info: dict) -> bool:
+    """A Glorb on any firmware: the vendor's (version says GLORB), Glorby's own build (reports
+    a network watchdog and a GLORB release name), or plain WLED set up like a Glorb (80 faces,
+    or the stock 20 x 6 matrix of 120). The same test as web/discover.js and the integration."""
+    if f"{info.get('ver', '')} {info.get('release', '')}".upper().find("GLORB") >= 0 or "netwd" in info:
+        return True
+    leds = info.get("leds") or {}
+    matrix = leds.get("matrix") or {}
+    return leds.get("count") == 80 or (leds.get("count") == 120 and matrix.get("w") == 20 and matrix.get("h") == 6)
+
+
+def mdns_browse(seconds: float = 2.0) -> set[str]:
+    """Ask for WLED's mDNS service and collect the address of everything that answers."""
+    query = struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0) + encode_name("_wled._tcp.local") + struct.pack("!HH", TYPE_PTR, 1)
+    found: set[str] = set()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as s:
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        try:
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip()))
+        except OSError:
+            pass
+        s.settimeout(0.25)
+        deadline = time.monotonic() + seconds
+        # Sent from a normal port, so lamps answer straight back to it (RFC 6762, 6.7).
+        for _ in range(2):
+            try:
+                s.sendto(query, (MDNS_GROUP, MDNS_PORT))
+            except OSError:
+                return found
+            pause = time.monotonic() + seconds / 2
+            while time.monotonic() < min(pause, deadline):
+                try:
+                    data, (address, _) = s.recvfrom(9000)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if len(data) >= 12 and struct.unpack("!H", data[2:4])[0] & 0x8000:
+                    found.add(address)
+    return found
+
+
+def interfaces() -> dict[str, int]:
+    """This computer's private IPv4 addresses and their network sizes, from its own settings."""
+    found: dict[str, int] = {}
+    for command in (["ip", "-o", "-4", "addr"], ["ifconfig"]):
+        if not shutil.which(command[0]):
+            continue
+        try:
+            text = subprocess.run(command, capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in text.splitlines():
+            words = line.split()
+            if "inet" not in words or words.index("inet") + 1 >= len(words):
+                continue
+            address = words[words.index("inet") + 1]
+            try:
+                if "/" in address:
+                    address, bits = address.split("/")
+                    prefix = int(bits)
+                elif "netmask" in words:
+                    mask = words[words.index("netmask") + 1]
+                    number = int(mask, 16) if mask.startswith("0x") else int(ipaddress.ip_address(mask))
+                    prefix = bin(number).count("1")
+                else:
+                    prefix = 24
+            except (ValueError, IndexError):
+                continue
+            if is_private(address):
+                found[address] = prefix
+        if found:
+            break
+    return found
+
+
+def prefix_length(ip: str) -> int:
+    """The network size this computer is set up with for ip. Assumes /24 if unsure."""
+    return interfaces().get(ip, 24)
+
+
+def gateway() -> str | None:
+    """The router's address, from this computer's routing table."""
+    for command, marker in ((["route", "-n", "get", "default"], "gateway:"), (["ip", "route", "show", "default"], "via")):
+        if not shutil.which(command[0]):
+            continue
+        try:
+            words = subprocess.run(command, capture_output=True, text=True, timeout=3).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if marker in words and words.index(marker) + 1 < len(words):
+            return words[words.index(marker) + 1]
+    return None
+
+
+def network_blocked(hosts: list[str]) -> bool:
+    """True when macOS's Local Network privacy setting keeps this program off the network.
+
+    On a working network something always answers, if only the router turning the
+    connection away. A blocked program hears nothing from anyone, even the router.
+    """
+    if platform.system() != "Darwin" or answered.intersection(hosts):
+        return False
+    router = gateway()
+    if router:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.5)
+            if s.connect_ex((router, 80)) in (0, errno.ECONNREFUSED):
+                return False
+    return True
+
+
+def is_private(ip: str) -> bool:
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return address.version == 4 and address.is_private and not address.is_loopback
+
+
+def range_hosts(network: ipaddress.IPv4Network) -> list[str]:
+    return [str(h) for h in network.hosts()]
+
+
+def own_network(ip: str) -> ipaddress.IPv4Network:
+    # Bigger networks are cut to the 1,022 addresses around this computer, to keep the search quick.
+    return ipaddress.ip_network(f"{ip}/{max(prefix_length(ip), 22)}", strict=False)
+
+
+# Ranges home routers and mesh systems hand out by default, so the deep search reaches
+# lights that a router keeps apart from computers (Eero, Deco, Google, UniFi, ASUS, Fritz!Box...).
+COMMON_RANGES = [
+    "192.168.0", "192.168.1", "192.168.2", "192.168.3", "192.168.4", "192.168.5", "192.168.8", "192.168.10",
+    "192.168.20", "192.168.30", "192.168.50", "192.168.68", "192.168.86", "192.168.88", "192.168.100",
+    "192.168.178", "10.0.0", "10.0.1", "10.0.2", "10.1.1", "10.10.10", "172.16.0",
+]
+
+
+def nearby_networks(ip: str) -> list[ipaddress.IPv4Network]:
+    """Ranges next to this one and the usual router defaults. Lights often sit apart, like 192.168.4.x beside 192.168.1.x."""
+    a, b, _, _ = ip.split(".")
+    ranges = [f"{a}.{b}.{c}" for c in range(16)] + COMMON_RANGES
+    return [ipaddress.ip_network(f"{r}.0/24") for r in dict.fromkeys(ranges)]
+
+
+KNOWN = Path.home() / ".glorby" / "lamps.json"
+
+
+def known_addresses() -> list[str]:
+    try:
+        return [lamp["address"] for lamp in json.loads(KNOWN.read_text())]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def keep_known(lamps: list[dict]) -> None:
+    """Remember where lamps were, so the next quick search looks there first."""
+    if not lamps:
+        return
+    try:
+        KNOWN.parent.mkdir(exist_ok=True)
+        KNOWN.write_text(json.dumps([{"address": l["address"], "name": l["name"], "mac": l["mac"]} for l in lamps]))
+    except OSError:
+        pass
+
+
+def discover(hints: list[str] = (), deep: bool = False) -> dict:
+    """Find the Glorbs on the network.
+
+    The quick search (about three seconds) asks mDNS and checks every network this
+    computer is on, plus the ranges of any lamp seen before. The deep search (about twenty
+    seconds) also checks neighbouring ranges and the usual router defaults, which finds
+    lamps a router keeps on a range of their own.
+    """
+    # Every network this computer is on: a Mac can be on Wi-Fi and Ethernet at once.
+    mine = interfaces()
+    primary = local_ip()
+    if is_private(primary):
+        mine.setdefault(primary, 24)
+    networks = [ipaddress.ip_network(f"{ip}/{max(bits, 22)}", strict=False) for ip, bits in mine.items()]
+    for hint in [*hints, *known_addresses()]:
+        if is_private(hint):
+            networks.append(ipaddress.ip_network(f"{hint}/24", strict=False))
+    if deep:
+        for ip in mine:
+            networks += nearby_networks(ip)
+    hosts = list(dict.fromkeys(h for n in networks for h in range_hosts(n) if h not in mine))
+    with ThreadPoolExecutor(max_workers=256) as pool:
+        browsing = pool.submit(mdns_browse)
+        swept = dict(zip(hosts, pool.map(lambda h: fetch_info(h, 0.8 if deep else 1.0), hosts)))
+        heard = browsing.result()
+        for host in heard - set(swept):
+            swept[host] = fetch_info(host)
+    lamps, others, seen = [], 0, set()
+    for host, info in sorted(swept.items(), key=lambda item: ipaddress.ip_address(item[0])):
+        if not info:
+            continue
+        mac = info.get("mac") or host
+        if mac in seen:
+            continue
+        seen.add(mac)
+        if not is_glorb(info):
+            others += 1
+            continue
+        lamps.append({
+            "address": info.get("ip") or host,
+            "name": info.get("name") or "Glorb",
+            "mac": info.get("mac"),
+            "ver": info.get("ver"),
+            "mdns": host in heard,
+        })
+    keep_known(lamps)
+    result = {"lamps": lamps, "others": others, "searched": len(hosts), "deep": deep}
+    if not lamps and not others and network_blocked(hosts):
+        result["blocked"] = (
+            "macOS is keeping Glorby's helper off your network. Open System Settings, "
+            "Privacy & Security, Local Network, and turn on Python. Then search again."
+        )
+    return result
+
+
+# ---------------------------------------------------------------- the friendly name
+
+
+class Responder(threading.Thread):
+    """Answers mDNS questions for <name>.local with this computer's address."""
+
+    def __init__(self, name: str, ip: str):
+        super().__init__(daemon=True)
+        self.host, self.ip = f"{name}.local".lower(), ip
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        self.sock.bind(("", MDNS_PORT))
+        membership = socket.inet_aton(MDNS_GROUP) + socket.inet_aton(ip)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
+
+    def _answer(self, query_id: int, echo: bytes) -> bytes:
+        # Direct replies carry a short life and no cache-flush bit, as RFC 6762 6.7 asks.
+        klass, ttl = (1, 10) if echo else (0x8001, 120)
+        record = encode_name(self.host) + struct.pack("!HHIH", TYPE_A, klass, ttl, 4) + socket.inet_aton(self.ip)
+        questions_count = 1 if echo else 0
+        return struct.pack("!HHHHHH", query_id, 0x8400, questions_count, 1, 0, 0) + echo + record
+
+    def announce(self) -> None:
+        for _ in range(2):
+            self.sock.sendto(self._answer(0, b""), (MDNS_GROUP, MDNS_PORT))
+            time.sleep(1)
+
+    def run(self) -> None:
+        threading.Thread(target=self.announce, daemon=True).start()
+        while True:
+            try:
+                data, sender = self.sock.recvfrom(9000)
+                asked = [q for q in questions(data) if q[0] == self.host and q[1] in (TYPE_A, TYPE_ANY)]
+            except (OSError, ValueError, IndexError, struct.error):
+                continue
+            if not asked:
+                continue
+            if sender[1] != MDNS_PORT:
+                # A one-shot question from an ordinary port gets a direct reply that repeats it.
+                echo = encode_name(self.host) + struct.pack("!HH", TYPE_A, 1)
+                self.sock.sendto(self._answer(struct.unpack("!H", data[:2])[0], echo), sender)
+            else:
+                self.sock.sendto(self._answer(0, b""), (MDNS_GROUP, MDNS_PORT))
+
+
+def advertise(name: str, port: int, ip: str):
+    """Make <name>.local point here. Uses the system's own mDNS service when there is one."""
+    if platform.system() == "Darwin" and shutil.which("dns-sd"):
+        return subprocess.Popen(
+            ["dns-sd", "-P", "Glorby", "_http._tcp", "local", str(port), f"{name}.local", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    if shutil.which("avahi-publish-address"):
+        return subprocess.Popen(
+            ["avahi-publish-address", "-R", f"{name}.local", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    responder = Responder(name, ip)
+    responder.start()
+    return responder
+
+
+# ---------------------------------------------------------------- the web server
+
+
+# ---------------------------------------------------------------- staying up to date
+
+UPDATE_EVERY = 60
+WATCHED = [ROOT / "web", ROOT / "custom_components" / "glorb" / "frontend"]
+restart = threading.Event()
+
+
+def git(*args: str) -> str:
+    result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"git {args[0]} failed")
+    return result.stdout.strip()
+
+
+def version() -> str:
+    """Changes whenever the app's files do, from a pull or a local edit. Open pages reload when it changes."""
+    newest = max((f.stat().st_mtime for folder in WATCHED for f in folder.rglob("*") if f.is_file()), default=0)
+    try:
+        head = git("rev-parse", "--short", "HEAD")
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        head = "local"
+    return f"{head}-{int(newest)}"
+
+
+# What the settings page shows about updates.
+status = {"auto": False, "checked": None, "message": "Not checked yet"}
+update_lock = threading.Lock()
+
+
+def build() -> dict:
+    """The version people see: the integration's number, plus the exact commit it's built from."""
+    try:
+        number = json.loads((ROOT / "custom_components" / "glorb" / "manifest.json").read_text())["version"]
+    except (OSError, ValueError, KeyError):
+        number = "dev"
+    info = {"number": number, "version": version(), **status}
+    try:
+        info.update(
+            commit=git("rev-parse", "--short", "HEAD"),
+            date=git("log", "-1", "--format=%cI"),
+            subject=git("log", "-1", "--format=%s"),
+            branch=git("rev-parse", "--abbrev-ref", "HEAD"),
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+    return info
+
+
+def check_for_update(server: ThreadingHTTPServer | None = None) -> dict:
+    """Pull a new version if there is one, and say what happened. Restarts the helper if it changed itself."""
+    with update_lock:
+        try:
+            changed = update_once()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as err:
+            status.update(checked=time.time(), message=f"Couldn't check: {err}")
+            return {"updated": False, "message": status["message"]}
+        status["checked"] = time.time()
+        if not changed:
+            status["message"] = "Up to date"
+            return {"updated": False, "message": "Up to date"}
+        summary = git("log", "-1", "--format=%h %s")
+        status["message"] = f"Updated to {summary}"
+        print(status["message"])
+        if server and "tools/serve.py" in changed.splitlines():
+            restart_soon(server, "The helper itself changed, so it's restarting.")
+        return {"updated": True, "message": status["message"]}
+
+
+def update_once() -> str | None:
+    """Fast-forward to the newest commit on this branch. Returns what changed, or None."""
+    if git("status", "--porcelain", "--untracked-files=no"):
+        # Someone is editing here, so leave their work alone.
+        raise RuntimeError("this copy has local changes, so it isn't updated automatically")
+    git("fetch", "--quiet")
+    before = git("rev-parse", "HEAD")
+    try:
+        upstream = git("rev-parse", "@{u}")
+    except RuntimeError:
+        return None  # The branch doesn't track one on GitHub.
+    if upstream == before or git("merge-base", before, upstream) != before:
+        return None
+    git("merge", "--ff-only", "--quiet", upstream)
+    return git("diff", "--name-only", before, upstream)
+
+
+HELPER = Path(__file__).resolve()
+
+
+def fingerprint() -> bytes:
+    try:
+        return HELPER.read_bytes()
+    except OSError:
+        return b""
+
+
+def restart_soon(server: ThreadingHTTPServer, reason: str) -> None:
+    print(reason)
+    restart.set()
+    threading.Thread(target=server.shutdown, daemon=True).start()
+
+
+def keep_updated(server: ThreadingHTTPServer, update: bool) -> None:
+    """Pull new versions in the background, and restart when this file changes on disk.
+
+    Pages reload themselves. The helper restarts whenever its own code changes, whoever
+    changed it: its own pull, a `git pull` by hand, or an edit.
+    """
+    status["auto"] = update
+    loaded = fingerprint()
+    while not restart.is_set():
+        time.sleep(UPDATE_EVERY)
+        try:
+            if update:
+                check_for_update(server)
+            if not restart.is_set() and fingerprint() != loaded:
+                restart_soon(server, "The helper's code changed on disk, so it's restarting.")
+        except Exception as err:  # noqa: BLE001 - this loop must never die quietly
+            print(f"Update check failed: {err}")
+
+
+def install() -> None:
+    """Start the helper whenever this computer starts, and keep it running."""
+    command = [sys.executable, str(Path(__file__).resolve())]
+    if platform.system() == "Darwin":
+        plist = Path.home() / "Library" / "LaunchAgents" / "me.glorb.glorby.plist"
+        arguments = "".join(f"<string>{part}</string>" for part in command)
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>me.glorb.glorby</string>
+<key>ProgramArguments</key><array>{arguments}</array>
+<key>WorkingDirectory</key><string>{ROOT}</string>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>{Path.home() / ".glorby" / "glorby.log"}</string>
+<key>StandardErrorPath</key><string>{Path.home() / ".glorby" / "glorby.log"}</string>
+</dict></plist>
+""")
+        (Path.home() / ".glorby").mkdir(exist_ok=True)
+        subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
+        subprocess.run(["launchctl", "load", "-w", str(plist)], check=True)
+        print(f"Glorby now starts with this Mac. Log: ~/.glorby/glorby.log. Undo with: launchctl unload -w {plist}")
+    elif shutil.which("systemctl"):
+        unit = Path.home() / ".config" / "systemd" / "user" / "glorby.service"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(f"""[Unit]
+Description=Glorby web app
+After=network-online.target
+
+[Service]
+WorkingDirectory={ROOT}
+ExecStart={" ".join(command)}
+Restart=always
+
+[Install]
+WantedBy=default.target
+""")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", "glorby"], check=True)
+        print("Glorby now starts with this computer. Logs: journalctl --user -u glorby. Undo with: systemctl --user disable --now glorby")
+    else:
+        sys.exit("Starting with the computer is set up for macOS and Linux. Run python3 tools/serve.py yourself here.")
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/web/")
+            self.end_headers()
+            return
+        if path == "/api/version":
+            self._json(build() if "full" in self.path else {"version": version()})
+            return
+        if path == "/api/discover":
+            query = urllib.parse.parse_qs(self.path.partition("?")[2])
+            self._json(discover(query.get("hint", []), "deep" in query))
+            return
+        super().do_GET()
+
+    def do_POST(self) -> None:
+        if self.path.split("?", 1)[0] == "/api/update":
+            self._json(check_for_update(self.server))
+            return
+        self.send_error(404)
+
+    def _json(self, data: dict) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def end_headers(self) -> None:
+        # Always check for a newer copy, so an update shows up on the next reload.
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+    def log_message(self, format: str, *args) -> None:
+        pass
+
+
+def serve(port_choices: list[int]) -> tuple[ThreadingHTTPServer, int]:
+    handler = functools.partial(Handler, directory=str(ROOT))
+    for port in port_choices:
+        try:
+            return ThreadingHTTPServer(("", port), handler), port
+        except OSError:
+            continue
+    sys.exit(f"Couldn't use port {', '.join(map(str, port_choices))}. Pick another with --port.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--port", type=int, help="port to serve on (default: 80, else 5180)")
+    parser.add_argument("--name", default="glorby", help="friendly name, reached as <name>.local (default: glorby)")
+    parser.add_argument("--no-name", action="store_true", help="don't advertise the friendly name")
+    parser.add_argument("--discover", action="store_true", help="just list the lamps found, then exit")
+    parser.add_argument("--deep", action="store_true", help="with --discover, also search the neighbouring ranges")
+    parser.add_argument("--install", action="store_true", help="start the helper with this computer and keep it running")
+    parser.add_argument("--no-update", action="store_true", help="don't pull new versions from GitHub every minute")
+    args = parser.parse_args()
+    # Under launchd or systemd the log is a file, so write each line out as it happens.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    if args.install:
+        install()
+        return
+
+    if args.discover:
+        print(json.dumps(discover(deep=args.deep), indent=2))
+        return
+
+    server, port = serve([args.port] if args.port else [80, 5180])
+    ip = local_ip()
+    suffix = "" if port == 80 else f":{port}"
+    advertiser = None
+    if not args.no_name:
+        try:
+            advertiser = advertise(args.name, port, ip)
+        except OSError as err:
+            print(f"Couldn't advertise {args.name}.local ({err}). Use the address below instead.")
+    print("Glorby is running. Open it on any device on this network:")
+    if advertiser:
+        print(f"  http://{args.name}.local{suffix}")
+    print(f"  http://{ip}{suffix}")
+    update = not args.no_update and (ROOT / ".git").exists()
+    threading.Thread(target=keep_updated, args=(server, update), daemon=True).start()
+    if update:
+        print("New versions on GitHub are picked up within a minute, and open pages reload by themselves.")
+    print("Press Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        if isinstance(advertiser, subprocess.Popen):
+            advertiser.terminate()
+    if restart.is_set():
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+if __name__ == "__main__":
+    main()
