@@ -496,6 +496,8 @@ static CRGBPalette16 buildPalette(const PalDef &d) {
 
 class GlorbyFx : public Usermod {
  public:
+  void loop() override {}
+
   void setup() override {
     using namespace glorby;
     for (int i = 0; i < N; i++) {
