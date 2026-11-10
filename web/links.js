@@ -2,6 +2,7 @@
 // Home Assistant runs effects itself. The other links run them here, in the browser.
 
 import { LocalStudio } from "./local.js";
+import { nativeCatalog, nativeSegment } from "./native.js";
 
 const STALE_MS = 8000;
 const RETRY_MS = 3000;
@@ -12,6 +13,12 @@ const LAMP_BACKLOG = 4096;
 // page or device that sees a different name there knows it has been taken over and stops,
 // so two pages never paint the lamp at once.
 const CLAIM = "Glorby ";
+// The name a lamp carries while it runs a Glorby effect by itself. A page streaming effects
+// treats it as taken, and the firmware's lease leaves it alone.
+const NATIVE = "Glorby";
+// Where an effect the lamp runs by itself is saved, so it comes back after a restart.
+const NATIVE_PRESET = 250;
+const NATIVE_SAVE_MS = 8000;
 const CLAIM_CHECK_MS = 2500;
 
 /** The lamp's own effect, as a Glorby claim name ("Glorby abc123~67") carries it, or null. */
@@ -56,6 +63,8 @@ export class WledLink {
       onChange: () => this._emit(this.available),
       onRelease: () => this._handBack(),
     });
+    this.native = { fx: {}, pal: {} };
+    this.nativeOn = false;
     this.token = Math.random().toString(36).slice(2, 8);
     // Closing the page while effects play gives the lamp back, add-on included.
     addEventListener("pagehide", () => this.local.release());
@@ -99,6 +108,7 @@ export class WledLink {
       this._get("/presets.json").catch(() => ({})),
     ]);
     this.cells = map.cells;
+    this.native = nativeCatalog(effects, palettes);
     await this.local.ready(map);
     const named = {};
     Object.entries(presets).forEach(([id, preset]) => {
@@ -147,7 +157,7 @@ export class WledLink {
     this.handlers.forEach((handler) => handler({ rgb: display }));
     const socket = this.socket;
     const now = performance.now();
-    if (!this.cells || socket?.readyState !== WebSocket.OPEN) return;
+    if (this.nativeOn || !this.cells || socket?.readyState !== WebSocket.OPEN) return;
     // A slow lamp gets fewer frames rather than a growing queue.
     // Checked from the frame loop, which keeps going in a background tab when timers slow down.
     if (now - (this.checkedAt || 0) > CLAIM_CHECK_MS) {
@@ -180,7 +190,7 @@ export class WledLink {
     const segments = this.lamp.state.seg || [];
     if (!this.claim) {
       const current = segments.find((seg) => seg.id === main) || {};
-      const takenOver = String(current.n || "").startsWith(CLAIM);
+      const takenOver = String(current.n || "").startsWith(CLAIM) || current.n === NATIVE;
       this.claim = {
         name: takenOver ? "" : current.n || "",
         others: segments.filter((seg) => seg.id !== main && seg.on).map((seg) => seg.id),
@@ -279,7 +289,7 @@ export class WledLink {
   _takenBy(state) {
     const main = (state.seg || []).find((seg) => seg.id === (state.mainseg ?? 0));
     const name = String(main?.n || "");
-    return !!this.claimed && name.startsWith(CLAIM) && name !== this.claimed;
+    return !!this.claimed && (name.startsWith(CLAIM) || name === NATIVE) && name !== this.claimed;
   }
 
   /**
@@ -317,6 +327,11 @@ export class WledLink {
 
   /** Give the lamp back its own effect, and live data back to Home Assistant, after effects here stop. */
   _handBack() {
+    // The lamp is running the effect by itself, so it keeps going after the page lets go.
+    if (this.nativeOn && !this.claim) {
+      this.nativeOn = false;
+      return Promise.resolve();
+    }
     this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
     const claim = this.claim || { name: "", others: [], fx: null, addons: null };
     this.claim = null;
@@ -418,10 +433,83 @@ export class WledLink {
     });
   }
 
+  /** The segment settings for the lamp to run the current effect itself, or null. */
+  _nativeNow() {
+    const now = this.local.engine?.snapshot() || {};
+    return now.effect ? nativeSegment(this.native, now.effect, now.params, this.local.engine.globals) : null;
+  }
+
+  /**
+   * After the effect or its settings change: let the lamp run it by itself when its firmware
+   * can, and otherwise claim the lamp and stream frames from here.
+   */
+  async _route() {
+    const seg = this.local.running ? this._nativeNow() : null;
+    if (!seg) {
+      if (this.nativeOn) this.nativeOn = false;
+      if (this.local.running && !this.claimed) await this._claim();
+      return;
+    }
+    this.channel?.postMessage({ claim: this.token });
+    if (this.claim) {
+      // Streaming stops, and the lamp takes the effect over itself.
+      this.local.onRelease = () => {};
+      this.nativeOn = true;
+      const claim = this.claim;
+      this.claim = null;
+      this.claimed = null;
+      if (claim.addons) await this._settings(claim.addons).catch(() => {});
+      this.socket?.readyState === WebSocket.OPEN && this.socket.send(JSON.stringify({ lv: true }));
+      this.local.onRelease = () => this._handBack();
+      await this._post({
+        on: true,
+        lor: 0,
+        seg: [{ id: this._mainSegment(), n: NATIVE, ...seg }, ...claim.others.map((id) => ({ id, on: true }))],
+      });
+    } else {
+      this.nativeOn = true;
+      await this._post({ on: true, lor: 0, seg: [{ id: this._mainSegment(), n: NATIVE, ...seg }] });
+    }
+    this._saveSoon();
+  }
+
+  /** Keep the lamp's effect as its start-up look, once the settings stop changing (to spare its flash). */
+  _saveSoon() {
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(async () => {
+      if (!this.nativeOn) return;
+      try {
+        await this._post({ psave: NATIVE_PRESET, n: "Glorby", ib: true, sb: true });
+        const cfg = await this._get("/json/cfg");
+        if (cfg?.def?.ps !== NATIVE_PRESET) {
+          await fetch(`${this.base}/json/cfg`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ def: { ps: NATIVE_PRESET } }),
+          });
+        }
+      } catch {
+        // Not saved: the effect still runs, it just won't come back after a restart.
+      }
+    }, NATIVE_SAVE_MS);
+  }
+
   async call(type, extra = {}) {
     if (type === "glorb/power") {
       if (extra.on === false) this.local.release();
       return this._post(extra);
+    }
+    if (["glorb/play", "glorb/look_play", "glorb/params", "glorb/globals"].includes(type)) {
+      this.local.handle(type, extra);
+      return this._route();
+    }
+    if (type === "glorb/alert" && this.nativeOn) {
+      // Alerts are drawn here, so stream for the alert, then hand the effect back to the lamp.
+      this.nativeOn = false;
+      await this._claim();
+      this.local.handle(type, extra);
+      setTimeout(() => this._route(), (Math.max(0.1, Number(extra.duration) || 3) + 0.5) * 1000);
+      return undefined;
     }
     if (type === "glorb/play" || type === "glorb/look_play" || (type === "glorb/alert" && !this.local.running)) {
       await this._claim();
