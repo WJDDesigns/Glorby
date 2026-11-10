@@ -17,7 +17,16 @@ const CLAIM_CHECK_MS = 2500;
 /** The lamp's own effect, as a Glorby claim name ("Glorby abc123~67") carries it, or null. */
 function claimedFx(name) {
   const match = /~(\d+)$/.exec(String(name || ""));
-  return match ? Number(match[1]) : null;
+  return match ? knownFx(Number(match[1])) : null;
+}
+
+/**
+ * An effect worth putting back, or null. Plain Solid (0) is what a claim leaves the lamp on,
+ * so finding it usually means an earlier page never put the real effect back. Treating it as
+ * unknown makes the hand-back use the lamp's startup preset instead of staying on one colour.
+ */
+function knownFx(fx) {
+  return Number.isInteger(fx) && fx > 0 ? fx : null;
 }
 // The Glorb firmware's own add-on, in the lamp's settings.
 const ADDON = "GLORB";
@@ -179,7 +188,7 @@ export class WledLink {
         // effect even on a frozen segment, so the segment is switched to plain Solid.
         // A page taking over from another Glorby page (often its own earlier copy, before a
         // reload) reads the effect that page saved in the claim name.
-        fx: takenOver ? claimedFx(current.n) : current.fx ?? null,
+        fx: takenOver ? claimedFx(current.n) : knownFx(current.fx),
         addons: null,
       };
       // The firmware's own Glorb add-on flashes its own lights over the frames once a second.
