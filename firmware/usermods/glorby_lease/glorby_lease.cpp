@@ -16,17 +16,26 @@ class GlorbyLease : public Usermod {
     return seg.name && strncmp(seg.name, "Glorby ", 7) == 0;
   }
 
-  void release() {
-    Segment &seg = strip.getMainSegment();
-    realtimeOverride = REALTIME_OVERRIDE_NONE;
-    for (unsigned i = 0; i < strip.getSegmentsNum(); i++) strip.getSegment(i).freeze = false;
-    seg.clearName();
-    released++;
-    if (!(bootPreset && applyPreset(bootPreset))) {
-      seg.setMode(FX_MODE_COLORWAVES);
-      stateChanged = true;
-      stateUpdated(CALL_MODE_DIRECT_CHANGE);
+  // Goes through WLED's own JSON path under the JSON buffer lock, like any other client,
+  // so the web server task never sees a half-changed segment (e.g. a freed name).
+  bool release() {
+    if (!requestJSONBufferLock(JSON_LOCK_REMOTE)) return false;
+    pDoc->clear();
+    JsonObject root = pDoc->to<JsonObject>();
+    root[F("lor")] = 0;
+    JsonArray segs = root.createNestedArray(F("seg"));
+    for (unsigned i = 0; i < strip.getSegmentsNum(); i++) {
+      JsonObject s = segs.createNestedObject();
+      s[F("id")] = i;
+      s[F("frz")] = false;
+      if (i == strip.getMainSegmentId()) s[F("n")] = "";
     }
+    if (bootPreset) root[F("ps")] = bootPreset;
+    else segs[strip.getMainSegmentId()][F("fx")] = FX_MODE_COLORWAVES;
+    deserializeState(root, CALL_MODE_DIRECT_CHANGE);
+    releaseJSONBufferLock();
+    released++;
+    return true;
   }
 
  public:

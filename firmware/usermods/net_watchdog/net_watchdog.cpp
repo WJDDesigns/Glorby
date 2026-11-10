@@ -19,6 +19,7 @@ class NetWatchdog : public Usermod {
   unsigned long lastPing = 0;
   unsigned long reconnectAt = 0;
   uint32_t reconnects = 0, restarts = 0, pings = 0, lost = 0;
+  uint8_t bootReason = 0;      // esp_reset_reason_t of the last boot: 1 power-on, 3 software, 4 panic, 5-7 watchdogs, 8 deep sleep, 9 brownout
 
   static void onSuccess(esp_ping_handle_t, void *arg) { static_cast<NetWatchdog*>(arg)->replied = true; }
   static void onEnd(esp_ping_handle_t, void *arg) { static_cast<NetWatchdog*>(arg)->done = true; }
@@ -49,7 +50,7 @@ class NetWatchdog : public Usermod {
   }
 
  public:
-  void setup() override {}
+  void setup() override { bootReason = (uint8_t)esp_reset_reason(); }
 
   void connected() override {
     misses = 0;  // stay armed: once the gateway has answered since boot, silence counts
@@ -106,6 +107,7 @@ class NetWatchdog : public Usermod {
     nw[F("lost")] = lost;
     nw[F("reconnects")] = reconnects;
     nw[F("armed")] = armed;
+    nw[F("boot")] = bootReason;
   }
 
   void addToConfig(JsonObject &root) override {
