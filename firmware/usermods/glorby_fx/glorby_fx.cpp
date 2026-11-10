@@ -974,6 +974,261 @@ static void mode_matrix() {
 }
 static const char _data_matrix[] PROGMEM = "Glorby Matrix@!,Trail,Streams;Color,Lead color;;;sx=64,ix=108,c1=100";
 
+// ---- Music --------------------------------------------------------------------
+
+/** Sound from the AudioReactive usermod, shaped like the web app's mic.js. */
+struct Audio { float level, bass, mid, treble, beat, bins[16]; };
+static Audio AUDIO;
+static uint32_t audioAt = 0;
+static float bassAvg = 0;
+static void readAudio() {
+  if (audioAt == strip.now) return;  // once per frame, shared by all segments
+  const float dt = clampf((strip.now - audioAt) / 1000.f, 0, 0.1f);
+  audioAt = strip.now;
+  um_data_t *um = nullptr;
+  if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) || !um) {
+    for (int b = 0; b < 16; b++) AUDIO.bins[b] *= expf(-dt * 3);
+    AUDIO.level = AUDIO.bass = AUDIO.mid = AUDIO.treble = 0;
+    AUDIO.beat *= expf(-dt * 7);
+    return;
+  }
+  const float volume = *(float *)um->u_data[0];
+  const uint8_t *fft = (const uint8_t *)um->u_data[2];
+  for (int b = 0; b < 16; b++) {
+    float v = fft[b] / 255.f;
+    AUDIO.bins[b] += (v - AUDIO.bins[b]) * (v > AUDIO.bins[b] ? 0.7f : 0.25f);
+  }
+  AUDIO.level = fminf(1.f, volume / 255.f * 1.5f);
+  auto mean = [](int from, int to) { float t = 0; for (int b = from; b < to; b++) t += AUDIO.bins[b]; return t / (to - from); };
+  AUDIO.bass = mean(0, 3);
+  AUDIO.mid = mean(3, 9);
+  AUDIO.treble = mean(9, 16);
+  bassAvg += (AUDIO.bass - bassAvg) * 0.04f;
+  AUDIO.beat *= expf(-dt * 7);
+  if (AUDIO.bass > bassAvg * 1.45f && AUDIO.bass > 0.2f) AUDIO.beat = 1;
+}
+
+// Spectrum Globe: frequencies stacked from the bottom pole to the top.
+static void mode_spectrum() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  readAudio();
+  const float gain = slider(SEGMENT.intensity, 0.2f, 3.f);
+  for (int i = 0; i < N; i++) {
+    float height = (GEO_POS[i][2] + 1) / 2 * 15;
+    int low = (int)clampf(floorf(height), 0, 14);
+    float frac = height - low;
+    float value = AUDIO.bins[low] * (1 - frac) + AUDIO.bins[low + 1] * frac;
+    s->f.put(i, pal(height / 15 * 0.85f, false), clampf(value * gain, 0.03f, 1));
+  }
+  show(s->f);
+}
+static const char _data_spectrum[] PROGMEM = "Glorby Spectrum Globe@,Gain;;!;;ix=34";
+
+// Equalizer Crown: 16 bars round the equator.
+static void mode_eq() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  readAudio();
+  const float gain = slider(SEGMENT.intensity, 0.2f, 3.f);
+  for (int i = 0; i < N; i++) {
+    int index = ((int)floorf((LON[i] + PI) / TWO_PI * 16)) % 16;
+    float level = clampf(AUDIO.bins[index] * gain, 0, 1);
+    float up = (GEO_POS[i][2] + 1) / 2;
+    s->f.put(i, pal(up, false), smooth(0, 0.15f, level - up + 0.05f) * 0.97f + 0.03f);
+  }
+  show(s->f);
+}
+static const char _data_eq[] PROGMEM = "Glorby Equalizer Crown@,Gain;;!;;ix=34";
+
+// Beat Shockwave: a ring bursts out on every beat.
+struct Wave { float at[3]; float born; };
+struct BeatState : Base { Wave waves[6]; uint8_t count; bool armed; Frame f; };
+static void mode_beat() {
+  bool fresh;
+  auto *s = begin<BeatState>(fresh);
+  if (!s) return fallback();
+  if (fresh) s->armed = true;
+  readAudio();
+  const float waveSpeed = slider(SEGMENT.intensity, 0.5f, 5.f);
+  if (AUDIO.beat > 0.8f && s->armed) {
+    if (s->count == 6) { memmove(s->waves, s->waves + 1, 5 * sizeof(Wave)); s->count = 5; }
+    Wave &w = s->waves[s->count++];
+    randomUnit(w.at);
+    w.born = s->t;
+    s->armed = false;
+  }
+  if (AUDIO.beat < 0.5f) s->armed = true;
+  int keep = 0;
+  for (int k = 0; k < s->count; k++) if (s->t - s->waves[k].born < 1.6f) s->waves[keep++] = s->waves[k];
+  s->count = keep;
+  for (int i = 0; i < N; i++) {
+    float total = AUDIO.level * 0.12f;
+    for (int k = 0; k < s->count; k++) {
+      float age = s->t - s->waves[k].born;
+      float x = (angleTo(GEO_POS[i], s->waves[k].at) - age * waveSpeed) / 0.35f;
+      total += expf(-x * x) * (1 - age / 1.6f);
+    }
+    s->f.put(i, pal(clampf(total, 0, 1), false));
+  }
+  show(s->f);
+}
+static const char _data_beat[] PROGMEM = "Glorby Beat Shockwave@,Wave speed;;!;;ix=97";
+
+// Reactor Core: churning energy pumped by the bass, sparks on the treble.
+static void mode_core() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  readAudio();
+  const float gain = slider(SEGMENT.intensity, 0.2f, 3.f);
+  const float spin = s->t * (0.4f + AUDIO.mid) * 0.4f;
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float n = fbm(x * 2 + spin, y * 2 + spin, z * 2 + spin, 2);
+    float energy = clampf(AUDIO.bass * gain * 0.9f + AUDIO.beat * 0.25f + n * 0.25f + 0.08f, 0, 1);
+    if (frand() < AUDIO.treble * 0.14f) s->f.put(i, 1, 1, 1);
+    else s->f.put(i, pal(energy, false));
+  }
+  show(s->f);
+}
+static const char _data_core[] PROGMEM = "Glorby Reactor Core@,Gain;;!;;ix=34";
+
+// ---- Data ---------------------------------------------------------------------
+
+// Globe Clock: hour, minute and second spots running round the sphere, in local time.
+static void mode_clock() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const RGBf base = fromColor(SEGCOLOR(2));
+  for (int i = 0; i < N; i++) s->f.put(i, base);
+  if (timeKnown()) {
+    const time_t now = localTime;
+    const float sec = (now % 60) + (millis() % 1000) / 1000.f;  // ms only smooths the second hand
+    const float minute = ((now / 60) % 60 + sec / 60) / 60;
+    const float hour = (((now / 3600) % 24) % 12 + minute) / 12;
+    const float facing = facingOf();
+    struct Hand { float frac, lat, width; RGBf color; };
+    const Hand hands[3] = {{sec / 60, -50, 0.3f, {1, 1, 1}}, {minute, 8, 0.42f, fromColor(SEGCOLOR(1))}, {hour, 55, 0.55f, fromColor(SEGCOLOR(0))}};
+    for (const Hand &h : hands) {
+      float head[3];
+      dirLatLon(h.lat, facing - h.frac * 360, head);
+      for (int i = 0; i < N; i++) s->f.maxInto(i, h.color, 1 - smooth(h.width * 0.4f, h.width, angleTo(GEO_POS[i], head)));
+    }
+  }
+  show(s->f);
+}
+static const char _data_clock[] PROGMEM = "Glorby Globe Clock@,,,Facing;Hour,Minute,Base;;;c2=128";
+
+// Tank Gauge: fills like a tank. Home Assistant (or anything) sets the level slider.
+static void mode_gauge() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float level = SEGMENT.intensity / 255.f;
+  const float slosh = SEGMENT.custom1 / 255.f;
+  const float surface = level * 2 - 1;
+  const RGBf tone = pal(level, false);
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float tilt = sinf(s->t * 1.3f) * x * 0.1f * slosh + cosf(s->t * 0.9f) * y * 0.1f * slosh;
+    float full = 1 - smooth(-0.1f, 0.1f, z + tilt - surface);
+    s->f.put(i, tone.r * full + 0.012f * (1 - full), tone.g * full + 0.012f * (1 - full), tone.b * full + 0.02f * (1 - full));
+  }
+  show(s->f);
+}
+static const char _data_gauge[] PROGMEM = "Glorby Tank Gauge@,Level,Slosh;;!;;ix=153,c1=128";
+
+// Weather Window: the sky outside. Home Assistant (or anything) picks the sky slider.
+static const char *const SKIES[] = {"sun", "cloud", "rain", "snow", "storm", "fog", "stars"};
+struct WeatherState : Base { float drops[N]; float flash; Frame f; };
+static void mode_weather() {
+  bool fresh;
+  auto *s = begin<WeatherState>(fresh);
+  if (!s) return fallback();
+  if (fresh) for (int i = 0; i < N; i++) s->drops[i] = frand();
+  const int kind = min(6, SEGMENT.custom1 / 37);
+  if (kind == 0) {  // sun
+    float sunAt[3];
+    dirLatLon(45, s->t * 6, sunAt);
+    for (int i = 0; i < N; i++) {
+      float sky = 0.55f + 0.45f * (GEO_POS[i][2] + 1) / 2;
+      float sun = 1 - smooth(0.25f, 0.7f, angleTo(GEO_POS[i], sunAt));
+      s->f.put(i, 0.1f * sky * (1 - sun) + sun, 0.38f * sky * (1 - sun) + 0.9f * sun, 0.95f * sky * (1 - sun) + 0.5f * sun);
+    }
+    return show(s->f);
+  }
+  if (kind == 6) {  // stars
+    for (int i = 0; i < N; i++) {
+      float tw = frand() < 0.1f ? 0.5f : 0;
+      s->f.put(i, 0.005f + tw, 0.01f + tw, 0.05f + tw);
+    }
+    return show(s->f);
+  }
+  const bool snow = kind == 3, cloudy = kind == 1 || kind == 5;
+  if (!cloudy) {
+    for (int i = 0; i < N; i++) s->drops[i] = modf_(s->drops[i] + s->dt * (snow ? 0.6f : 2.f), 1.f);
+    if (kind == 4) {
+      if (frand() < s->dt * 0.4f) s->flash = 1;
+      s->flash *= expf(-s->dt * 7);
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float cover = smooth(-0.3f, 0.3f, fbm(x * 2 + s->t * 0.08f, y * 2, z * 2, 3));
+    if (cloudy) {
+      float grey[3] = {0.42f, 0.45f, 0.5f}, blue[3] = {0.1f, 0.28f, 0.6f};
+      if (kind == 5) { grey[0] = 0.28f; grey[1] = 0.3f; grey[2] = 0.3f; for (int c = 0; c < 3; c++) blue[c] = grey[c] * 0.7f; }
+      s->f.put(i, grey[0] * cover + blue[0] * (1 - cover), grey[1] * cover + blue[1] * (1 - cover), grey[2] * cover + blue[2] * (1 - cover));
+      continue;
+    }
+    float d = (s->drops[i] - (1 - (z + 1) / 2)) * (snow ? 6 : 9);
+    float streak = expf(-d * d);
+    const float tint[3] = {snow ? 0.8f : 0.2f, snow ? 0.85f : 0.5f, 1.f};
+    float flash = kind == 4 ? s->flash : 0;
+    const float base[3] = {0.03f, 0.05f, 0.1f};
+    float o[3];
+    for (int c = 0; c < 3; c++) o[c] = base[c] + cover * 0.08f + streak * tint[c] * 0.8f + flash;
+    s->f.put(i, o[0], o[1], o[2]);
+  }
+  show(s->f);
+}
+static const char _data_weather[] PROGMEM = "Glorby Weather Window@,,Sky;;;;c1=0";
+
+// ---- Basics -------------------------------------------------------------------
+
+// Pole to Pole: a gradient from top to bottom, gently waving.
+static void mode_gradient() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const RGBf top = fromColor(SEGCOLOR(0)), bottom = fromColor(SEGCOLOR(1));
+  for (int i = 0; i < N; i++) {
+    float k = clampf((GEO_POS[i][2] + 1) / 2 + sinf(s->clock + LON[i]) * 0.08f, 0, 1);
+    s->f.put(i, top.r * k + bottom.r * (1 - k), top.g * k + bottom.g * (1 - k), top.b * k + bottom.b * (1 - k));
+  }
+  show(s->f);
+}
+static const char _data_gradient[] PROGMEM = "Glorby Pole to Pole@!;Top,Bottom;;;sx=0";
+
+// Line Up: red top, green toward the front, blue to the right, for lining up the model.
+static void mode_lineup() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  for (int i = 0; i < N; i++) {
+    s->f.put(i, 0.015f, 0.015f, 0.015f);
+    if (GEO_POS[i][2] > 0.75f) s->f.put(i, 1, 0, 0);
+    if (GEO_POS[i][0] > 0.75f) s->f.put(i, 0, 1, 0);
+    if (GEO_POS[i][1] > 0.75f) s->f.put(i, 0, 0, 1);
+  }
+  show(s->f);
+}
+static const char _data_lineup[] PROGMEM = "Glorby Line Up@;;;;";
+
 // ---- palettes -----------------------------------------------------------------
 
 struct PalDef { const char *name; uint8_t count; uint32_t stops[8]; };
@@ -1060,6 +1315,15 @@ class GlorbyFx : public Usermod {
     strip.addEffect(255, &mode_pumpkin, _data_pumpkin);
     strip.addEffect(255, &mode_eye, _data_eye);
     strip.addEffect(255, &mode_face, _data_face);
+    strip.addEffect(255, &mode_spectrum, _data_spectrum);
+    strip.addEffect(255, &mode_eq, _data_eq);
+    strip.addEffect(255, &mode_beat, _data_beat);
+    strip.addEffect(255, &mode_core, _data_core);
+    strip.addEffect(255, &mode_clock, _data_clock);
+    strip.addEffect(255, &mode_gauge, _data_gauge);
+    strip.addEffect(255, &mode_weather, _data_weather);
+    strip.addEffect(255, &mode_gradient, _data_gradient);
+    strip.addEffect(255, &mode_lineup, _data_lineup);
 
     RAINBOW = buildPalette(PALETTES[5]);
     removeUsermodPalettes(PAL_OWNER);
@@ -1072,7 +1336,7 @@ class GlorbyFx : public Usermod {
 
   void addToJsonInfo(JsonObject &root) override {
     JsonObject g = root.createNestedObject(F("glorbyfx"));
-    g[F("effects")] = 28;
+    g[F("effects")] = 37;
     g[F("palettes")] = sizeof(glorby::PALETTES) / sizeof(glorby::PALETTES[0]);
   }
 

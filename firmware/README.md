@@ -25,7 +25,10 @@ ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with these additions:
   Faces (Eye, Face), the Ambient set (Aurora, Nebula, Plasma, Lava Lamp, Deep Ocean,
   Fireball, Starfield, Matrix) and the Geometry set (Sweep, Plane Scanner, Comets, Gyroscope,
   Barber Spiral, Interference, Polygon Dance, Pentagon Bloom, Life on a Sphere, Snake,
-  Raindrops, Disco Ball). Settings map onto WLED's sliders; speed 64 is the web app's 1x.
+  Raindrops, Disco Ball), Music (Spectrum Globe, Equalizer Crown, Reactor Core, Beat
+  Shockwave, fed by the built-in sound usermod), Data (Globe Clock, Tank Gauge, Weather
+  Window) and Basics (Pole to Pole, Line Up). Settings map onto WLED's sliders; speed 64 is
+  the web app's 1x.
   `glorby_geo.h` is generated from `web/lamp-map.json` by `tools/gen_geometry.py`.
 
 The build uses the lamp's existing partition table (`WLED_ESP32_8MB.csv`, identical to
