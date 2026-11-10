@@ -48,6 +48,7 @@ static inline float nrand() {  // standard normal
   float u = 1.f - frand();
   return sqrtf(-2.f * logf(u)) * cosf(TWO_PI * frand());
 }
+static inline float uniform(float lo, float hi) { return lo + (hi - lo) * frand(); }
 static inline void randomUnit(float *o) { o[0] = nrand(); o[1] = nrand(); o[2] = nrand(); unit3(o); }
 
 
@@ -146,8 +147,9 @@ static void show(const Frame &f) {
  */
 struct Base {
   uint32_t last;
-  float clock;
-  float dt;
+  float clock;  // seconds, scaled by the speed slider
+  float dt;     // seconds since the last frame
+  float t;      // seconds since the effect started, unscaled
 };
 
 /** Allocates T in the segment's data and advances its clock. Null if out of memory. */
@@ -163,6 +165,7 @@ template <typename T> static T *begin(bool &fresh) {
   s->last = strip.now;
   s->dt = clampf(dt, 0.f, 0.1f);
   s->clock += s->dt * speedOf();
+  s->t += s->dt;
   return s;
 }
 
@@ -486,6 +489,318 @@ static void mode_disco() {
 static const char _data_disco[] PROGMEM = "Glorby Disco Ball@!,,Spots;,Base;;;sx=64,c1=116";
 
 
+// ---- views and time -----------------------------------------------------------
+
+/** Each triangle seen from the front: forward, right, up, turned by the facing angle. */
+struct View { float forward[N], right[N], up[N]; };
+static void makeView(View &v, float facingDeg, float dRight = 0, float dUp = 0) {
+  float a = facingDeg * (PI / 180.f), c = cosf(a), sn = sinf(a);
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1];
+    v.forward[i] = x * c + y * sn;
+    v.right[i] = -x * sn + y * c + dRight;
+    v.up[i] = GEO_POS[i][2] - dUp;
+  }
+}
+/** Marks the one triangle nearest each (right, up) point, so features stay crisp. */
+static void nearestMarks(const View &v, const float (*pts)[2], int count, uint8_t *mask) {
+  memset(mask, 0, N);
+  for (int k = 0; k < count; k++) {
+    float r = pts[k][0], u = pts[k][1], f = sqrtf(fmaxf(0.f, 1 - r * r - u * u));
+    int best = 0;
+    float bestScore = -1e9f;
+    for (int i = 0; i < N; i++) {
+      float score = v.forward[i] * f + v.right[i] * r + v.up[i] * u;
+      if (score > bestScore) { bestScore = score; best = i; }
+    }
+    mask[best] = 1;
+  }
+}
+/** Facing in degrees from the custom2 slider (128 = straight ahead). */
+static inline float facingOf() { return (SEGMENT.custom2 - 128) * (180.f / 128.f); }
+
+static bool timeKnown() { return toki.getTimeSource() != TOKI_TS_NONE; }
+
+/** Where the sun is overhead right now, [lat, lon] in degrees. */
+static void subsolar(float &lat, float &lon) {
+  uint32_t now = toki.second();
+  uint32_t daySec = now % 86400;
+  // Day of the year, from days since 1970 (good enough for a lamp).
+  time_t tt = now;
+  struct tm g;
+  gmtime_r(&tt, &g);
+  int day = g.tm_yday + 1;
+  float hours = daySec / 3600.f;
+  lat = -23.44f * cosf((360.f / 365.f) * (day + 10) * (PI / 180.f));
+  lon = (12 - hours) * 15;
+}
+/** 0 is new moon, 0.5 full. */
+static float moonPhaseNow() {
+  const double newMoon = 947182440.0;  // 2000-01-06 18:14 UTC
+  double days = (toki.second() - newMoon) / 86400.0;
+  double ph = fmod(days / 29.530588, 1.0);
+  return (float)(ph < 0 ? ph + 1 : ph);
+}
+
+// ---- Worlds -------------------------------------------------------------------
+
+struct Land { float lat, lon, radius; };
+static const Land LAND[] = {
+  {48, -100, 27}, {24, -100, 11}, {64, -125, 16}, {15, -86, 6},
+  {-12, -58, 20}, {-34, -66, 10}, {6, -70, 9},
+  {6, 21, 22}, {24, 12, 17}, {-22, 25, 12}, {8, 40, 8},
+  {50, 15, 12}, {62, 25, 9},
+  {52, 95, 30}, {24, 80, 11}, {24, 108, 12}, {66, 110, 16}, {36, 55, 10}, {-2, 115, 7},
+  {-25, 134, 12}, {72, -40, 9},
+};
+static constexpr int LANDS = sizeof(LAND) / sizeof(LAND[0]);
+static float LAND_AT[LANDS][3];
+
+// Earth: continents, ice, clouds, real daylight and city lights at night.
+struct SpinState : Base { float turn; Frame f; };
+static void mode_earth() {
+  bool fresh;
+  auto *s = begin<SpinState>(fresh);
+  if (!s) return fallback();
+  const float spin = slider(SEGMENT.speed, -6.f, 6.f);
+  const float night = SEGMENT.intensity / 255.f;
+  s->turn += s->dt * spin * 0.15f;
+  const float cosT = cosf(s->turn), sinT = sinf(s->turn);
+  float subLat = 15, subLon = s->t * 0.1f * (180.f / PI);
+  if (SEGMENT.check1 && timeKnown()) subsolar(subLat, subLon);
+  float sun[3];
+  dirLatLon(subLat, subLon, sun);
+  static const float sea[3] = {0, 0.14f, 0.55f}, ground[3] = {0.08f, 0.5f, 0.12f}, desert[3] = {0.72f, 0.5f, 0.16f},
+                     dark[3] = {0, 0.01f, 0.05f}, glow[3] = {1, 0.65f, 0.25f};
+  for (int i = 0; i < N; i++) {
+    const float px = GEO_POS[i][0], py = GEO_POS[i][1], pz = GEO_POS[i][2];
+    float p[3] = {px * cosT + py * sinT, -px * sinT + py * cosT, pz};
+    float land = 0;
+    for (int k = 0; k < LANDS; k++)
+      land = fmaxf(land, 1 - smooth(LAND[k].radius * 0.7f, LAND[k].radius * 1.15f, angleTo(p, LAND_AT[k]) * (180.f / PI)));
+    float ice = smooth(62, 76, fabsf(asinf(clampf(p[2], -1, 1)) * (180.f / PI)));
+    float latAbs = fabsf(p[2]);
+    float dry = smooth(0.15f, 0.3f, latAbs) * (1 - smooth(0.4f, 0.6f, latAbs));
+    float clouds = smooth(0.2f, 0.55f, fbm(p[0] * 2.2f + s->t * 0.03f, p[1] * 2.2f, p[2] * 2.2f, 2));
+    float day = smooth(-0.12f, 0.2f, dot3(p, sun));
+    float cities = land * (1 - day) * night * (0.6f + 0.4f * noise3(p[0] * 7, p[1] * 7, p[2] * 7));
+    float o[3];
+    for (int c = 0; c < 3; c++) {
+      float v = (ground[c] * (1 - dry) + desert[c] * dry) * land + sea[c] * (1 - land);
+      v = v * (1 - ice) + ice * 0.95f;
+      v = v * (1 - clouds * 0.6f) + clouds * 0.6f;
+      o[c] = v * (0.04f + 0.96f * day) + dark[c] * (1 - day) + cities * glow[c];
+    }
+    s->f.put(i, o[0], o[1], o[2]);
+  }
+  show(s->f);
+}
+static const char _data_earth[] PROGMEM = "Glorby Earth@Spin,Night glow,,,,Real daylight;;;;sx=149,ix=89,o1=1";
+
+// Moon: tonight's phase, or one you choose.
+static void mode_moon() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  static View v;
+  makeView(v, facingOf());
+  const float phase = (SEGMENT.check1 && timeKnown()) ? moonPhaseNow() : SEGMENT.custom1 / 255.f;
+  const float a = phase * TWO_PI;
+  const float shine = slider(SEGMENT.intensity, 0.f, 0.3f);
+  for (int i = 0; i < N; i++) {
+    const float *p = GEO_POS[i];
+    float lit = smooth(-0.1f, 0.1f, v.forward[i] * -cosf(a) + v.right[i] * sinf(a));
+    float surface = clampf(0.62f + 0.38f * fbm(p[0] * 2.6f, p[1] * 2.6f, p[2] * 2.6f, 3), 0, 1);
+    float k = surface * (shine + (1 - shine) * lit);
+    s->f.put(i, k, k * 0.97f, k * 0.88f);
+  }
+  show(s->f);
+}
+static const char _data_moon[] PROGMEM = "Glorby Moon@,Earthshine,Phase,Facing,,Tonight's phase;;;;ix=51,c1=128,c2=128,o1=1";
+
+// Sun: a churning surface with flares.
+static CRGBPalette16 EMBER;  // filled in setup()
+static void mode_sun() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float activity = SEGMENT.intensity / 255.f;
+  const float c = s->clock;
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float heat = clampf(0.5f + 1.1f * fbm(x * 2.4f, y * 2.4f, z * 2.4f + c * 0.25f, 3), 0, 1);
+    float flare = smooth(0.62f - activity * 0.3f, 0.9f, 0.5f + 0.5f * noise3(x * 1.6f + c * 0.4f, y * 1.6f + c * 0.4f, z * 1.6f + c * 0.4f));
+    float t = clampf(0.38f + 0.42f * heat + 0.25f * flare, 0, 1);
+    s->f.put(i, fromColor(ColorFromPalette(EMBER, (unsigned)(t * 255), 255, LINEARBLEND_NOWRAP)));
+  }
+  show(s->f);
+}
+static const char _data_sun[] PROGMEM = "Glorby Sun@!,Activity;;;;sx=64,ix=128";
+
+// Jupiter: banded clouds and the great red spot.
+static void mode_jupiter() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const float turn = s->clock * 0.25f, c = cosf(turn), sn = sinf(turn);
+  static const float light[3] = {0.95f, 0.82f, 0.6f}, dark[3] = {0.55f, 0.26f, 0.1f}, red[3] = {0.85f, 0.12f, 0.03f};
+  float spotAt[3];
+  dirLatLon(-22, 0, spotAt);
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], y = GEO_POS[i][1], z = GEO_POS[i][2];
+    float p[3] = {x * c + y * sn, -x * sn + y * c, z};
+    float wobble = 0.12f * noise3(p[0] * 2.4f, p[1] * 2.4f, p[2] * 5);
+    float band = 0.5f + 0.5f * sinf((p[2] + wobble) * 9.5f);
+    float spot = SEGMENT.check1 ? 1 - smooth(0.28f, 0.5f, angleTo(p, spotAt)) : 0;
+    float o[3];
+    for (int k = 0; k < 3; k++) o[k] = (dark[k] + (light[k] - dark[k]) * band) * (1 - spot) + red[k] * spot;
+    s->f.put(i, o[0], o[1], o[2]);
+  }
+  show(s->f);
+}
+static const char _data_jupiter[] PROGMEM = "Glorby Jupiter@!,,,,,Red spot;;;;sx=64,o1=1";
+
+// Basketball: orange with black seams, spinning.
+static void mode_basketball() {
+  bool fresh;
+  auto *s = begin<SpinState>(fresh);
+  if (!s) return fallback();
+  s->turn += s->dt * slider(SEGMENT.speed, -6.f, 6.f) * 0.8f;
+  const float t = slider(SEGMENT.intensity, -90.f, 90.f) * (PI / 180.f);
+  for (int i = 0; i < N; i++) {
+    const float x = GEO_POS[i][0], py = GEO_POS[i][1], pz = GEO_POS[i][2];
+    float y = py * cosf(t) - pz * sinf(t);
+    float z = py * sinf(t) + pz * cosf(t);
+    float a = x * cosf(s->turn) - z * sinf(s->turn);
+    float c = x * sinf(s->turn) + z * cosf(s->turn);
+    float seam = fminf(fabsf(y), fminf(fabsf(a), fabsf(fabsf(c) - 0.62f - 0.3f * y * y)));
+    float k = 0.08f + 0.92f * smooth(0.02f, 0.11f, seam);
+    s->f.put(i, 0.95f * k, 0.32f * k, 0.03f * k);
+  }
+  show(s->f);
+}
+static const char _data_basketball[] PROGMEM = "Glorby Basketball@Spin,Tilt;;;;sx=149,ix=156";
+
+// Pumpkin: a carved face lit by a flickering candle.
+static void mode_pumpkin() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  static View v;
+  static uint8_t cut[N];
+  static const float pts[][2] = {{-0.42f, 0.4f}, {-0.3f, 0.2f}, {0.42f, 0.4f}, {0.3f, 0.2f}, {0, 0.05f},
+                                 {-0.7f, -0.2f}, {-0.45f, -0.45f}, {-0.15f, -0.6f}, {0.15f, -0.6f}, {0.45f, -0.45f}, {0.7f, -0.2f}};
+  makeView(v, facingOf());
+  nearestMarks(v, pts, 11, cut);
+  const float flicker = SEGMENT.intensity / 255.f;
+  const float flame = 1 - flicker * 0.55f * (0.5f + 0.5f * sinf(s->t * 13) * sinf(s->t * 7.3f));
+  for (int i = 0; i < N; i++) {
+    if (cut[i]) s->f.put(i, flame, 0.82f * flame, 0.2f * flame);
+    else {
+      float ribs = (0.62f + 0.38f * fabsf(cosf(LON[i] * 5))) * 0.5f;
+      s->f.put(i, 0.8f * ribs, 0.24f * ribs, 0.01f * ribs);
+    }
+  }
+  show(s->f);
+}
+static const char _data_pumpkin[] PROGMEM = "Glorby Pumpkin@,Candle flicker,,Facing;;;;ix=179,c2=128";
+
+// ---- Faces --------------------------------------------------------------------
+
+// Eye: looks around and blinks.
+struct EyeState : Base { float gaze[2], target[2], nextLook, nextBlink, blinkAt; Frame f; };
+static void mode_eye() {
+  bool fresh;
+  auto *s = begin<EyeState>(fresh);
+  if (!s) return fallback();
+  if (fresh) { s->nextBlink = 2; s->blinkAt = -9; }
+  static View v;
+  makeView(v, facingOf());
+  if (SEGMENT.check1) {
+    if (s->t > s->nextLook) {
+      s->target[0] = uniform(-0.8f, 0.8f);
+      s->target[1] = uniform(-0.8f, 0.8f) * 0.6f;
+      s->nextLook = s->t + uniform(0.8f, 3.2f);
+    }
+  } else {
+    s->target[0] = slider(SEGMENT.custom1, -1.f, 1.f);
+    s->target[1] = (SEGMENT.custom3 - 16) / 15.f;
+  }
+  const float follow = fminf(1.f, s->dt * 12);
+  for (int k = 0; k < 2; k++) s->gaze[k] += (s->target[k] - s->gaze[k]) * follow;
+  if (SEGMENT.check2 && s->t > s->nextBlink) { s->blinkAt = s->t; s->nextBlink = s->t + uniform(2, 6); }
+  const float closed = fmaxf(0.f, 1 - fabsf(s->t - s->blinkAt - 0.11f) / 0.11f);
+  float gaze[3] = {1, s->gaze[0] * 0.9f, s->gaze[1] * 0.9f};
+  unit3(gaze);
+  const float pupil = slider(SEGMENT.intensity, 0.1f, 0.6f);
+  const RGBf irisC = fromColor(SEGCOLOR(0)), sclera = fromColor(SEGCOLOR(1));
+  static const float skin[3] = {0.22f, 0.06f, 0.04f};
+  for (int i = 0; i < N; i++) {
+    float q[3] = {v.forward[i], v.right[i], v.up[i]};
+    float a = angleTo(q, gaze);
+    float shade = 0.35f + 0.65f * smooth(-0.4f, 0.5f, v.forward[i]);
+    float iris = 1 - smooth(pupil + 0.42f, pupil + 0.62f, a);
+    float ring = 0.65f + 0.35f * cosf(a * 9);
+    float dark = 1 - smooth(pupil * 0.9f, pupil + 0.18f, a);
+    float lid = smooth(0, 0.25f, 1 - closed * 1.05f - fabsf(v.up[i]) * 0.9f);
+    const float sc[3] = {sclera.r, sclera.g, sclera.b}, ic[3] = {irisC.r, irisC.g, irisC.b};
+    float o[3];
+    for (int c = 0; c < 3; c++) {
+      float val = sc[c] * shade;
+      val = val * (1 - iris) + ic[c] * ring * iris;
+      val *= 1 - dark;
+      o[c] = val * lid + skin[c] * (1 - lid);
+    }
+    s->f.put(i, o[0], o[1], o[2]);
+  }
+  show(s->f);
+}
+static const char _data_eye[] PROGMEM =
+    "Glorby Eye@,Pupil,Look left/right,Facing,Look up/down,Look around,Blinks;Iris,White;;;ix=102,c1=128,c2=128,c3=16,o1=1,o2=1";
+
+// Face: a simple face with moods.
+static const char *const MOODS[] = {"Happy", "Sad", "Surprised", "Wink", "Angry", "Sleepy"};
+static void mode_face() {
+  bool fresh;
+  auto *s = begin<PlainState>(fresh);
+  if (!s) return fallback();
+  const int mood = min(5, SEGMENT.custom1 / 43);
+  const float bob = SEGMENT.intensity / 255.f;
+  static View v;
+  makeView(v, facingOf(), sinf(s->t * 0.9f) * 0.1f * bob, sinf(s->t * 1.6f) * 0.04f * bob);
+  const bool blink = modf_(s->t, 4.1f) < 0.14f;
+  float pts[16][2];
+  int n = 0;
+  for (int side = -1; side <= 1; side += 2) {
+    bool closed = blink || mood == 5 || (mood == 3 && side == 1);
+    if (!closed) { pts[n][0] = side * 0.4f; pts[n++][1] = 0.35f; }
+    if (mood == 2) { pts[n][0] = side * 0.4f; pts[n++][1] = 0.55f; }
+    if (mood == 4) { pts[n][0] = side * 0.22f; pts[n++][1] = 0.42f; }
+  }
+  static const float smile[][2] = {{-0.65f, -0.15f}, {-0.4f, -0.45f}, {-0.13f, -0.6f}, {0.13f, -0.6f}, {0.4f, -0.45f}, {0.65f, -0.15f}};
+  static const float sad[][2] = {{-0.5f, -0.65f}, {-0.25f, -0.4f}, {0.25f, -0.4f}, {0.5f, -0.65f}};
+  static const float angry[][2] = {{-0.4f, -0.5f}, {0, -0.5f}, {0.4f, -0.5f}};
+  static const float sleepy[][2] = {{0, -0.5f}};
+  static const float surprised[][2] = {{0, -0.45f}, {0, -0.7f}};
+  const float (*mouth)[2] = smile;
+  int mn = 6;
+  if (mood == 1) { mouth = sad; mn = 4; }
+  else if (mood == 2) { mouth = surprised; mn = 2; }
+  else if (mood == 4) { mouth = angry; mn = 3; }
+  else if (mood == 5) { mouth = sleepy; mn = 1; }
+  for (int k = 0; k < mn; k++) { pts[n][0] = mouth[k][0]; pts[n++][1] = mouth[k][1]; }
+  static uint8_t marks[N];
+  nearestMarks(v, pts, n, marks);
+  const RGBf skinC = fromColor(SEGCOLOR(0)), feature = fromColor(SEGCOLOR(1));
+  for (int i = 0; i < N; i++) {
+    float k = 0.55f + 0.45f * smooth(-1, 0.2f, v.forward[i]);
+    if (marks[i]) s->f.put(i, feature);
+    else s->f.put(i, skinC, k);
+  }
+  show(s->f);
+}
+static const char _data_face[] PROGMEM = "Glorby Face@,Bob,Mood,Facing;Skin,Features;;;ix=77,c1=0,c2=128";
+
 // ---- Ambient ----------------------------------------------------------------
 
 // Aurora: curtains of light round the upper sphere.
@@ -623,7 +938,6 @@ static const char _data_stars[] PROGMEM = "Glorby Starfield@!,Density;Tint,Night
 // Matrix: streams of code falling down meridians, pole to pole.
 static constexpr int MAX_STREAMS = 14;
 struct MatrixState : Base { float lon[MAX_STREAMS], head[MAX_STREAMS], rate[MAX_STREAMS], glyph[N]; Frame f; };
-static inline float uniform(float lo, float hi) { return lo + (hi - lo) * frand(); }
 static void mode_matrix() {
   bool fresh;
   auto *s = begin<MatrixState>(fresh);
@@ -736,6 +1050,16 @@ class GlorbyFx : public Usermod {
     strip.addEffect(255, &mode_fireball, _data_fireball);
     strip.addEffect(255, &mode_stars, _data_stars);
     strip.addEffect(255, &mode_matrix, _data_matrix);
+    for (int k = 0; k < LANDS; k++) dirLatLon(LAND[k].lat, LAND[k].lon, LAND_AT[k]);
+    EMBER = buildPalette(PALETTES[1]);
+    strip.addEffect(255, &mode_earth, _data_earth);
+    strip.addEffect(255, &mode_moon, _data_moon);
+    strip.addEffect(255, &mode_sun, _data_sun);
+    strip.addEffect(255, &mode_jupiter, _data_jupiter);
+    strip.addEffect(255, &mode_basketball, _data_basketball);
+    strip.addEffect(255, &mode_pumpkin, _data_pumpkin);
+    strip.addEffect(255, &mode_eye, _data_eye);
+    strip.addEffect(255, &mode_face, _data_face);
 
     RAINBOW = buildPalette(PALETTES[5]);
     removeUsermodPalettes(PAL_OWNER);
@@ -748,7 +1072,7 @@ class GlorbyFx : public Usermod {
 
   void addToJsonInfo(JsonObject &root) override {
     JsonObject g = root.createNestedObject(F("glorbyfx"));
-    g[F("effects")] = 20;
+    g[F("effects")] = 28;
     g[F("palettes")] = sizeof(glorby::PALETTES) / sizeof(glorby::PALETTES[0]);
   }
 
