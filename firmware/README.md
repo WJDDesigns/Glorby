@@ -17,7 +17,12 @@ ESP-IDF 4.4.8, newer than GLORB's 4.4.3) for the lamp, with these additions:
   `Glorby …`) and no JSON has arrived for 60 s (longer than a Wi-Fi dropout), it ends the claim: live override off,
   segments unfrozen, name cleared, and the boot preset applied (or Colorwaves if none).
   That way a page that disappears without handing back, for example because the Mac slept,
-  can't leave the lamp dark. Settings live under `GlorbyLease`, and `/json/info` shows `lease`.
+  can't leave the lamp dark. It also undoes WLED's low-memory fallback: when the largest
+  free memory block stays under 14 KB for 15 s (this lamp's Wi-Fi stalls cause that), WLED
+  switches every segment to Solid. The usermod remembers the main segment's effect and
+  settings while memory is fine, and puts them back once memory has been healthy for 10 s,
+  unless someone chose Solid since. Settings live under `GlorbyLease` (`relight` turns this
+  off), and `/json/info` shows `lease` with `relit`, `block` and `minBlock`.
 - `usermods/glorby_fx`: Glorby's sphere effects running on the lamp itself, so they keep
   playing with no browser or Home Assistant attached, and presets bring them back after a
   restart. They show up in WLED's effect list as `Glorby <name>`, and Glorby's 16 palettes
